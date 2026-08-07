@@ -4,8 +4,10 @@ output contract into the generic tool_loop.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +26,7 @@ if str(STARTER_KIT_DIR) not in sys.path:
 
 import mock_services as gc  # noqa: E402  (path must be set up first)
 
+from .logging_utils import get_logger, log_event  # noqa: E402
 from .output_tool import (  # noqa: E402
     SUBMIT_RESOLUTION_SCHEMA,
     SUBMIT_RESOLUTION_TOOL_NAME,
@@ -31,6 +34,8 @@ from .output_tool import (  # noqa: E402
 )
 from .prompts import SYSTEM_PROMPT  # noqa: E402
 from .tool_loop import ModelAPIError, ToolCallRecord, ToolLoopResult, run_tool_loop  # noqa: E402
+
+_logger = get_logger(__name__)
 
 DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 # The SDK itself already retries connection errors and 408/409/429/5xx with
@@ -66,6 +71,7 @@ class ResolverAgent:
 
         Returns the submit_resolution arguments (reasoning_chain,
         action_taken, customer_response) plus bookkeeping fields:
+        ``_case_id`` (a short id correlating this resolution's log lines),
         ``_tool_calls`` (a trace of every GlobalCart tool call made),
         ``_validation_warnings`` (any mismatch between the stated decision
         and what the tools actually returned) and ``_stopped_reason``
@@ -76,6 +82,8 @@ class ResolverAgent:
         is caught here and turned into a safe escalation. Any other
         exception is a real bug and is left to propagate, not swallowed.
         """
+        case_id = uuid.uuid4().hex[:8]
+        ctx = {"case_id": case_id}
         messages: List[Dict[str, Any]] = [{"role": "user", "content": ticket_text}]
 
         try:
@@ -88,9 +96,19 @@ class ResolverAgent:
                 tool_registry=self.tool_registry,
                 stop_tool_name=SUBMIT_RESOLUTION_TOOL_NAME,
                 max_iterations=self.max_iterations,
+                log_context=ctx,
             )
         except ModelAPIError as exc:
+            log_event(
+                _logger,
+                logging.ERROR,
+                "agent.api_error",
+                error_type=type(exc.original).__name__,
+                tool_calls_so_far=len(exc.tool_calls),
+                **ctx,
+            )
             resolution = self._api_failure_resolution(exc)
+            resolution["_case_id"] = case_id
             resolution["_tool_calls"] = [
                 {"name": c.name, "input": c.input, "result": c.result} for c in exc.tool_calls
             ]
@@ -99,9 +117,11 @@ class ResolverAgent:
             return resolution
 
         resolution = self._extract_resolution(result.tool_calls)
+        used_fallback = resolution is None
         if resolution is None:
             resolution = self._fallback_resolution(result)
 
+        resolution["_case_id"] = case_id
         resolution["_tool_calls"] = [
             {"name": c.name, "input": c.input, "result": c.result}
             for c in result.tool_calls
@@ -109,6 +129,29 @@ class ResolverAgent:
         ]
         resolution["_validation_warnings"] = validate_resolution(resolution, result.tool_calls)
         resolution["_stopped_reason"] = result.stopped_reason
+
+        if used_fallback:
+            log_event(_logger, logging.WARNING, "agent.fallback_resolution_used", stopped_reason=result.stopped_reason, **ctx)
+        elif resolution["_validation_warnings"]:
+            log_event(
+                _logger,
+                logging.WARNING,
+                "agent.validation_warnings",
+                warning_count=len(resolution["_validation_warnings"]),
+                decision=resolution.get("action_taken", {}).get("decision"),
+                **ctx,
+            )
+        else:
+            log_event(
+                _logger,
+                logging.INFO,
+                "agent.case_resolved",
+                decision=resolution.get("action_taken", {}).get("decision"),
+                tools_called=len(resolution["_tool_calls"]),
+                stopped_reason=result.stopped_reason,
+                **ctx,
+            )
+
         return resolution
 
     @staticmethod
