@@ -9,12 +9,20 @@ programmer-error wrapping.
 
 from __future__ import annotations
 
+import anthropic
 import pytest
 
 from resolver_agent.output_tool import SUBMIT_RESOLUTION_TOOL_NAME
-from resolver_agent.tool_loop import ToolExecutionError, run_tool_loop
+from resolver_agent.tool_loop import ModelAPIError, ToolExecutionError, run_tool_loop
 
-from .helpers import ScriptedClient, ScriptedResponse, text_block, tool_use_block
+from .helpers import (
+    ScriptedClient,
+    ScriptedResponse,
+    fake_api_connection_error,
+    fake_bad_request_error,
+    text_block,
+    tool_use_block,
+)
 
 
 def _run(script, tool_schemas, tool_registry, max_iterations=8):
@@ -199,3 +207,37 @@ def test_run_tool_loop_when_tool_raises_type_error_should_wrap_as_tool_execution
             tool_schemas,
             tool_registry,
         )
+
+
+def test_run_tool_loop_when_api_call_raises_should_wrap_as_model_api_error_with_partial_trace(
+    tool_schemas, tool_registry
+):
+    # First round succeeds and executes a real tool call; the second round's
+    # API call fails the way the SDK actually fails after its own internal
+    # retries are exhausted (or immediately, for a non-retryable error like
+    # this one). The partial trace from round 1 must not be lost.
+    with pytest.raises(ModelAPIError) as exc_info:
+        _run(
+            [
+                ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+                fake_api_connection_error(),
+            ],
+            tool_schemas,
+            tool_registry,
+        )
+
+    err = exc_info.value
+    assert len(err.tool_calls) == 1
+    assert err.tool_calls[0].name == "get_order_details"
+    assert isinstance(err.__cause__, anthropic.APIConnectionError)
+
+
+def test_run_tool_loop_when_api_call_raises_on_the_very_first_call_should_still_wrap_cleanly(
+    tool_schemas, tool_registry
+):
+    with pytest.raises(ModelAPIError) as exc_info:
+        _run([fake_bad_request_error()], tool_schemas, tool_registry)
+
+    err = exc_info.value
+    assert err.tool_calls == []
+    assert isinstance(err.__cause__, anthropic.BadRequestError)

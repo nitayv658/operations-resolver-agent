@@ -41,6 +41,24 @@ class ToolExecutionError(RuntimeError):
     """
 
 
+class ModelAPIError(RuntimeError):
+    """The call to the Anthropic API itself failed.
+
+    The SDK already retries connection errors and 408/409/429/5xx responses
+    internally (``max_retries``, default 2, with exponential backoff) --
+    this is raised only for what reaches us afterward: retries exhausted, or
+    an immediately non-retryable error (e.g. 400/401/403/404, such as the
+    "credit balance too low" 400 hit during live testing). Carries whatever
+    tool calls had already completed before the failure, so a caller doesn't
+    lose the partial audit trail.
+    """
+
+    def __init__(self, tool_calls: List["ToolCallRecord"], original: BaseException) -> None:
+        super().__init__(f"{type(original).__name__}: {original}")
+        self.tool_calls = tool_calls
+        self.original = original
+
+
 def _signature(name: str, tool_input: Dict[str, Any]) -> tuple:
     return (name, tuple(sorted(tool_input.items())))
 
@@ -50,6 +68,13 @@ def _stringify(result: Any) -> str:
         return json.dumps(result)
     except TypeError:
         return str(result)
+
+
+def _create(client: "anthropic.Anthropic", tool_calls_so_far: List[ToolCallRecord], **kwargs: Any) -> Any:
+    try:
+        return client.messages.create(**kwargs)
+    except anthropic.APIError as exc:
+        raise ModelAPIError(list(tool_calls_so_far), exc) from exc
 
 
 def run_tool_loop(
@@ -92,7 +117,9 @@ def run_tool_loop(
     extra_kwargs = {} if temperature is None else {"temperature": temperature}
 
     for _ in range(max_iterations):
-        response = client.messages.create(
+        response = _create(
+            client,
+            tool_calls,
             model=model,
             max_tokens=max_tokens,
             system=system,
@@ -170,7 +197,9 @@ def run_tool_loop(
             return ToolLoopResult(response, messages, tool_calls, "stop")
 
     if stop_tool_name is not None:
-        response = client.messages.create(
+        response = _create(
+            client,
+            tool_calls,
             model=model,
             max_tokens=max_tokens,
             system=system,

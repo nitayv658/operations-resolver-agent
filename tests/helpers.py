@@ -11,9 +11,27 @@ the agent's logic works (see Anti-Pattern 1/3 in the review protocol).
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
+
+import anthropic
+import httpx
 
 _counter = [0]
+
+
+def fake_api_connection_error(message: str = "Connection error.") -> anthropic.APIConnectionError:
+    """A real anthropic.APIConnectionError -- the base class our code catches
+    for retryable-but-exhausted / connection-level failures."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    return anthropic.APIConnectionError(message=message, request=request)
+
+
+def fake_bad_request_error(message: str = "Your credit balance is too low.") -> anthropic.BadRequestError:
+    """A real anthropic.BadRequestError (400) -- the exact class hit live
+    when the account ran out of credits. Not retried by the SDK itself."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(400, request=request, json={"error": {"message": message}})
+    return anthropic.BadRequestError(message, response=response, body={"error": {"message": message}})
 
 
 def tool_use_block(name: str, input_: Dict[str, Any]) -> SimpleNamespace:
@@ -40,10 +58,13 @@ class ScriptedResponse:
 class ScriptedClient:
     """A stand-in for anthropic.Anthropic(). Returns one ScriptedResponse per
     call to .messages.create(), in order, regardless of what arguments (model,
-    system, messages, tools, tool_choice, ...) it was called with."""
+    system, messages, tools, tool_choice, ...) it was called with. A script
+    entry that is an exception instance is raised instead of returned --
+    simulating the SDK surfacing an API error after its own internal retries
+    (if any) are exhausted."""
 
-    def __init__(self, script: List[ScriptedResponse]):
-        self._script = list(script)
+    def __init__(self, script: List[Union[ScriptedResponse, BaseException]]):
+        self._script: List[Union[ScriptedResponse, BaseException]] = list(script)
         self.calls = 0
 
     class _Messages:
@@ -57,7 +78,10 @@ class ScriptedClient:
                     "ScriptedClient ran out of scripted responses -- the loop "
                     "made more calls to messages.create() than the test expected."
                 )
-            return self._outer._script.pop(0)
+            item = self._outer._script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
 
     @property
     def messages(self) -> "ScriptedClient._Messages":
