@@ -110,6 +110,7 @@ against this:
 | Malformed input (negative amount, invalid reason, non-existent order passed to `process_refund`) | The tools return structured `{"error": ...}` dicts rather than raising; the agent reads the error and reports it instead of crashing or retrying blindly. |
 | Repeating the same tool call | `tool_loop.py` tracks `(tool_name, args)` signatures already seen and refuses to re-execute an identical call, feeding back a message telling the model to stop retrying and act on what it already has. |
 | Runaway loop | `max_iterations` (default 8) caps the number of tool-calling rounds; if hit, the loop forces a final `submit_resolution` call so the agent still returns a safe, structured answer (defaulting to escalation) instead of hanging. |
+| API/network failure | The Anthropic SDK already retries connection errors and 408/409/429/5xx internally; `tool_loop.py` catches whatever reaches it afterward (retries exhausted, or an immediately non-retryable error like the 400 "credit balance too low" hit during live testing) and wraps it as `ModelAPIError`, preserving any partial tool trace. `ResolverAgent.resolve()` catches only that typed error and returns a safe `ESCALATION_REQUIRED` instead of crashing the caller — any other exception (a real bug) still propagates. |
 
 ---
 
