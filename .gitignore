@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+.pytest_cache/
 
 # Raw saved snapshot of the quest brief webpage -- superseded by
 # docs/quest-brief/ (the actual source markdown from the quest's repo).

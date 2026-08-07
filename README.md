@@ -161,6 +161,33 @@ live model call.
 
 ---
 
+## Testing
+
+There are three tiers of verification here, and they check different things:
+
+| Suite | What it checks | Needs an API key? |
+|---|---|---|
+| `starter-kit/examples/verify_scenarios.py` | The data/rule engine (`mock_services.py`, untouched) is internally consistent | No |
+| `pytest` (`tests/`) | `resolver_agent`'s own logic — loop mechanics, guardrails, output validation | No |
+| `run_scenarios.py` | The *agent's* judgment end to end, against a live model | Yes |
+
+The `pytest` suite covers the parts of the agent that don't require an LLM
+call to verify: `tests/test_tool_loop.py` drives `run_tool_loop` with a
+scripted fake "model" (see `tests/helpers.py`) so it can assert on the loop's
+own mechanics — the repeat-call guard, both `max_iterations` termination
+paths, unrecognized-tool handling, and TypeError wrapping — while every tool
+call the fake model requests is still dispatched through the real
+`starter-kit` functions, not a mock of them. `tests/test_output_tool.py`
+does the same for `validate_resolution`, including a regression test for the
+exact under-request-to-dodge-escalation bug caught during live testing.
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+---
+
 ## Demo video
 
 *(optional, ≤2 min — add a link here showing a happy-path run and an

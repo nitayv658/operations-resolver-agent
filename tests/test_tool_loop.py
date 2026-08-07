@@ -1,0 +1,201 @@
+"""Tests for tool_loop.run_tool_loop().
+
+Only the model is faked (via ScriptedClient, see tests/helpers.py) -- real
+tool dispatch runs through the real starter-kit mock_services functions, so
+these tests prove the loop's own mechanics: dispatch, the repeat-call guard,
+both max_iterations termination paths, unknown-tool handling, and
+programmer-error wrapping.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from resolver_agent.output_tool import SUBMIT_RESOLUTION_TOOL_NAME
+from resolver_agent.tool_loop import ToolExecutionError, run_tool_loop
+
+from .helpers import ScriptedClient, ScriptedResponse, text_block, tool_use_block
+
+
+def _run(script, tool_schemas, tool_registry, max_iterations=8):
+    client = ScriptedClient(script)
+    messages = [{"role": "user", "content": "(scripted ticket)"}]
+    return run_tool_loop(
+        client=client,
+        model="mock",
+        system="(unused)",
+        messages=messages,
+        tool_schemas=tool_schemas,
+        tool_registry=tool_registry,
+        stop_tool_name=SUBMIT_RESOLUTION_TOOL_NAME,
+        max_iterations=max_iterations,
+    )
+
+
+def test_run_tool_loop_when_model_calls_real_tools_then_stops_should_dispatch_them_via_registry(
+    tool_schemas, tool_registry
+):
+    result = _run(
+        [
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+            ScriptedResponse([tool_use_block("get_user_profile", {"user_id": "USR-101"})]),
+            ScriptedResponse([tool_use_block("check_return_policy", {"order_id": "ORD-1001", "reason": "damaged_on_arrival"})]),
+            ScriptedResponse([tool_use_block("process_refund", {"order_id": "ORD-1001", "amount": 35.0, "reason": "damaged_on_arrival"})]),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_RESOLUTION_TOOL_NAME,
+                        {
+                            "reasoning_chain": ["..."],
+                            "action_taken": {"tools_called": [], "decision": "AUTO_REFUND_APPROVED", "refund_amount": 35.0, "refund_id": "RF-1001-3500"},
+                            "customer_response": "...",
+                        },
+                    )
+                ]
+            ),
+        ],
+        tool_schemas,
+        tool_registry,
+    )
+
+    assert result.stopped_reason == "stop"
+    called_names = [c.name for c in result.tool_calls]
+    assert called_names == [
+        "get_order_details",
+        "get_user_profile",
+        "check_return_policy",
+        "process_refund",
+        SUBMIT_RESOLUTION_TOOL_NAME,
+    ]
+    process_refund_call = next(c for c in result.tool_calls if c.name == "process_refund")
+    assert process_refund_call.result["status"] == "APPROVED"  # real dispatch, real fixture data
+
+
+def test_run_tool_loop_when_same_call_repeated_should_execute_only_once(tool_schemas, tool_registry):
+    result = _run(
+        [
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),  # exact repeat
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_RESOLUTION_TOOL_NAME,
+                        {
+                            "reasoning_chain": ["gave up after repeat"],
+                            "action_taken": {"tools_called": [], "decision": "ESCALATION_REQUIRED", "refund_amount": None, "refund_id": None},
+                            "customer_response": "...",
+                        },
+                    )
+                ]
+            ),
+        ],
+        tool_schemas,
+        tool_registry,
+    )
+
+    executed = [c for c in result.tool_calls if c.name == "get_order_details"]
+    assert len(executed) == 1  # not 2 -- the repeat was refused, not re-run
+
+    refusal_messages = [
+        block
+        for m in result.messages
+        if m.get("role") == "user" and isinstance(m.get("content"), list)
+        for block in m["content"]
+        if isinstance(block, dict) and "already called this tool" in str(block.get("content", ""))
+    ]
+    assert len(refusal_messages) == 1
+
+
+def test_run_tool_loop_when_model_never_stops_should_force_final_call_and_report_max_iterations(
+    tool_schemas, tool_registry
+):
+    # Distinct order ids each round -- the dedup guard would otherwise refuse
+    # a literal repeat and the loop would never advance to the forced call.
+    result = _run(
+        [
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1002"})]),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_RESOLUTION_TOOL_NAME,
+                        {
+                            "reasoning_chain": ["forced to conclude"],
+                            "action_taken": {"tools_called": [], "decision": "ESCALATION_REQUIRED", "refund_amount": None, "refund_id": None},
+                            "customer_response": "Escalating.",
+                        },
+                    )
+                ]
+            ),
+        ],
+        tool_schemas,
+        tool_registry,
+        max_iterations=2,
+    )
+
+    assert result.stopped_reason == "max_iterations"
+    submit_call = next(c for c in result.tool_calls if c.name == SUBMIT_RESOLUTION_TOOL_NAME)
+    assert submit_call.input["action_taken"]["decision"] == "ESCALATION_REQUIRED"
+
+
+def test_run_tool_loop_when_model_ignores_forced_stop_should_still_terminate_without_raising(
+    tool_schemas, tool_registry
+):
+    result = _run(
+        [
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1002"})]),
+            # forced call: model still doesn't comply, just talks
+            ScriptedResponse([text_block("I'm not sure what to do.")], stop_reason="end_turn"),
+        ],
+        tool_schemas,
+        tool_registry,
+        max_iterations=2,
+    )
+
+    assert result.stopped_reason == "max_iterations"
+    assert not any(c.name == SUBMIT_RESOLUTION_TOOL_NAME for c in result.tool_calls)
+
+
+def test_run_tool_loop_when_model_names_unknown_tool_should_return_error_dict_without_crashing(
+    tool_schemas, tool_registry
+):
+    result = _run(
+        [
+            ScriptedResponse([tool_use_block("delete_customer_account", {"user_id": "USR-101"})]),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_RESOLUTION_TOOL_NAME,
+                        {
+                            "reasoning_chain": ["no such tool"],
+                            "action_taken": {"tools_called": [], "decision": "CANNOT_RESOLVE", "refund_amount": None, "refund_id": None},
+                            "customer_response": "...",
+                        },
+                    )
+                ]
+            ),
+        ],
+        tool_schemas,
+        tool_registry,
+    )
+
+    unknown_call = next(c for c in result.tool_calls if c.name == "delete_customer_account")
+    assert unknown_call.result == {
+        "error": "UNKNOWN_TOOL",
+        "message": "No such tool: delete_customer_account",
+    }
+
+
+def test_run_tool_loop_when_tool_raises_type_error_should_wrap_as_tool_execution_error(
+    tool_schemas, tool_registry
+):
+    # get_order_details raises TypeError for a non-string order_id -- a
+    # genuine programmer/schema-violation error, distinct from the
+    # business-error dicts mock_services returns for bad *values*.
+    with pytest.raises(ToolExecutionError):
+        _run(
+            [ScriptedResponse([tool_use_block("get_order_details", {"order_id": 12345})])],
+            tool_schemas,
+            tool_registry,
+        )
