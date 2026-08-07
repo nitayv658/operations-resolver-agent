@@ -62,7 +62,7 @@ def run_tool_loop(
     *,
     stop_tool_name: Optional[str] = None,
     max_iterations: int = 8,
-    temperature: float = 0.2,
+    temperature: Optional[float] = None,
     max_tokens: int = 2048,
 ) -> ToolLoopResult:
     """Run send -> tool_use -> tool_result -> send until the model stops.
@@ -87,15 +87,18 @@ def run_tool_loop(
     seen_calls: set = set()
     tool_calls: List[ToolCallRecord] = []
     response = None
+    # Some models (e.g. claude-sonnet-5) reject an explicit `temperature` --
+    # only pass it through when the caller actually asked for one.
+    extra_kwargs = {} if temperature is None else {"temperature": temperature}
 
     for _ in range(max_iterations):
         response = client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            temperature=temperature,
             system=system,
             messages=messages,
             tools=tool_schemas,
+            **extra_kwargs,
         )
 
         if response.stop_reason != "tool_use":
@@ -170,11 +173,11 @@ def run_tool_loop(
         response = client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            temperature=temperature,
             system=system,
             messages=messages,
             tools=tool_schemas,
             tool_choice={"type": "tool", "name": stop_tool_name},
+            **extra_kwargs,
         )
         messages.append({"role": "assistant", "content": response.content})
         for block in response.content:
