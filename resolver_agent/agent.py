@@ -55,6 +55,8 @@ class ResolverAgent:
         model: str = DEFAULT_MODEL,
         max_iterations: int = 8,
     ) -> None:
+        if max_iterations < 1:
+            raise ValueError(f"max_iterations must be at least 1, got {max_iterations!r}.")
         if client is not None:
             self.client = client
         elif DEFAULT_MAX_RETRIES is not None:

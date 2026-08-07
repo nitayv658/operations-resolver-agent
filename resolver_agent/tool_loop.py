@@ -114,7 +114,19 @@ def run_tool_loop(
     A tool call repeated with the exact same arguments is not re-executed --
     a synthetic tool_result tells the model the retry was refused. This is
     what stops a confused agent from looping on the same failing call.
+
+    Raises:
+        ValueError: if ``max_iterations`` is not at least 1. The loop's
+            whole contract is "make at least one round trip to the model" --
+            with ``max_iterations <= 0`` and no ``stop_tool_name`` set, the
+            for-loop body would never run and the forced-final-call branch
+            (gated on ``stop_tool_name``) wouldn't either, silently handing
+            the caller a ``ToolLoopResult`` with ``final_message=None``
+            instead of failing.
     """
+    if max_iterations < 1:
+        raise ValueError(f"max_iterations must be at least 1, got {max_iterations!r}.")
+
     ctx = log_context or {}
     seen_calls: set = set()
     tool_calls: List[ToolCallRecord] = []

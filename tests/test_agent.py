@@ -173,3 +173,11 @@ def test_resolve_should_include_case_id_in_every_outcome():
     agent = ResolverAgent(client=client)
     result = agent.resolve("Hi.")
     assert isinstance(result["_case_id"], str) and result["_case_id"]
+
+
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_resolver_agent_when_max_iterations_is_not_positive_should_raise_at_construction(bad_value):
+    # Fail fast at construction time, not on the first .resolve() call --
+    # a misconfigured agent should never look like it was built successfully.
+    with pytest.raises(ValueError, match="max_iterations"):
+        ResolverAgent(client=ScriptedClient([]), max_iterations=bad_value)

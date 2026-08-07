@@ -327,3 +327,39 @@ def test_run_tool_loop_when_log_context_given_should_be_merged_into_every_record
     tool_loop_records = [r for r in caplog.records if r.name == "resolver_agent.tool_loop"]
     assert tool_loop_records  # sanity: at least the tool_executed DEBUG record fired
     assert all(r.fields.get("case_id") == "test-case-42" for r in tool_loop_records)
+
+
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_run_tool_loop_when_max_iterations_is_not_positive_should_raise_value_error(
+    tool_schemas, tool_registry, bad_value
+):
+    # With stop_tool_name=None and max_iterations<=0, the for loop never
+    # runs and the forced-final-call branch (gated on stop_tool_name being
+    # set) never runs either -- the function would otherwise fall through
+    # and return ToolLoopResult(final_message=None, ...), handing the
+    # caller a broken result instead of failing loudly. The loop's whole
+    # contract is "make at least one round trip to the model," so this
+    # must be a hard precondition, not a degenerate silent case.
+    with pytest.raises(ValueError, match="max_iterations"):
+        _run([], tool_schemas, tool_registry, max_iterations=bad_value, log_context=None)
+
+
+def test_run_tool_loop_when_max_iterations_zero_and_no_stop_tool_should_raise_not_return_broken_result(
+    tool_schemas, tool_registry
+):
+    # The exact original bug shape: stop_tool_name=None means the
+    # forced-final-call branch is skipped too, so without the precondition
+    # check this used to fall through to ToolLoopResult(final_message=None).
+    client = ScriptedClient([])
+    messages = [{"role": "user", "content": "(scripted ticket)"}]
+    with pytest.raises(ValueError, match="max_iterations"):
+        run_tool_loop(
+            client=client,
+            model="mock",
+            system="(unused)",
+            messages=messages,
+            tool_schemas=tool_schemas,
+            tool_registry=tool_registry,
+            stop_tool_name=None,
+            max_iterations=0,
+        )
