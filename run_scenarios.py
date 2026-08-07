@@ -23,6 +23,7 @@ import json
 import sys
 
 from resolver_agent import ResolverAgent
+from resolver_agent.logging_utils import configure_logging
 
 SCENARIOS = [
     {
@@ -111,6 +112,7 @@ SCENARIOS = [
 
 
 def main() -> int:
+    configure_logging()
     agent = ResolverAgent()
     failures = 0
 
@@ -128,7 +130,7 @@ def main() -> int:
         expected = scenario["expected"]
         ok = decision == expected
         status = "ok  " if ok else "FAIL"
-        print(f"  [{status}] decision={decision!r} expected={expected!r}")
+        print(f"  [{status}] decision={decision!r} expected={expected!r} case_id={result.get('_case_id')!r}")
         print(f"  tools_called: {(result.get('action_taken') or {}).get('tools_called')}")
         print(f"  customer_response: {result.get('customer_response')}")
 

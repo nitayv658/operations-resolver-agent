@@ -189,6 +189,39 @@ pytest
 
 ---
 
+## Logging
+
+`resolver_agent` emits structured JSON logs (one object per line) to
+**stderr** via the stdlib `logging` module — never stdout, which is reserved
+for `run_ticket.py`'s actual result. Every log line from one `resolve()` call
+carries the same `case_id`, so lines from concurrent or sequential cases
+don't get tangled together. Level is controlled by `LOG_LEVEL` (default
+`WARNING`, so a clean successful run prints nothing to stderr):
+
+```bash
+LOG_LEVEL=INFO python3 run_ticket.py "..."   2> >(jq .)   # pretty-print the logs separately
+```
+
+| Level | Event | When |
+|---|---|---|
+| `DEBUG` | `tool_loop.tool_executed` | every real GlobalCart tool call |
+| `WARNING` | `tool_loop.repeat_call_refused` / `tool_loop.unknown_tool_requested` / `tool_loop.max_iterations_reached` | the loop's own guardrails firing |
+| `WARNING` | `agent.validation_warnings` | the stated decision didn't match what a tool actually returned |
+| `WARNING` | `agent.fallback_resolution_used` | the model never called `submit_resolution` |
+| `ERROR` | `agent.api_error` | the Anthropic API call itself failed |
+| `INFO` | `agent.case_resolved` | a case resolved cleanly, no warnings |
+
+Never logged: the raw ticket text or the `customer_response` body — both can
+contain the customer's name. Log fields stay structural: `case_id`,
+`decision`, tool-call counts, `stopped_reason`, error type names.
+
+`resolver_agent` never calls `logging.basicConfig()` itself — only
+`run_ticket.py`/`run_scenarios.py` call `configure_logging()`, once, at
+startup. Embedding the package elsewhere (e.g. Part 2) means calling that
+yourself, or not, without it fighting over the root logger.
+
+---
+
 ## Demo video
 
 *(optional, ≤2 min — add a link here showing a happy-path run and an

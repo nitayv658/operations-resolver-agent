@@ -6,6 +6,10 @@ Usage:
 
 Requires ANTHROPIC_API_KEY to be set (in the environment or in a .env file --
 see .env.example).
+
+Structured logs go to stderr as JSON (one object per line), controlled by
+LOG_LEVEL (default WARNING -- a clean run prints nothing to stderr). The
+agent's actual result is the only thing printed to stdout.
 """
 
 from __future__ import annotations
@@ -14,9 +18,12 @@ import json
 import sys
 
 from resolver_agent import ResolverAgent
+from resolver_agent.logging_utils import configure_logging
 
 
 def main() -> int:
+    configure_logging()
+
     if len(sys.argv) < 2:
         print(f"Usage: python3 {sys.argv[0]} \"<ticket text>\"", file=sys.stderr)
         return 2
