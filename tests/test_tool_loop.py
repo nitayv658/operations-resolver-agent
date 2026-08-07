@@ -9,6 +9,8 @@ programmer-error wrapping.
 
 from __future__ import annotations
 
+import logging
+
 import anthropic
 import pytest
 
@@ -25,7 +27,7 @@ from .helpers import (
 )
 
 
-def _run(script, tool_schemas, tool_registry, max_iterations=8):
+def _run(script, tool_schemas, tool_registry, max_iterations=8, log_context=None):
     client = ScriptedClient(script)
     messages = [{"role": "user", "content": "(scripted ticket)"}]
     return run_tool_loop(
@@ -37,6 +39,7 @@ def _run(script, tool_schemas, tool_registry, max_iterations=8):
         tool_registry=tool_registry,
         stop_tool_name=SUBMIT_RESOLUTION_TOOL_NAME,
         max_iterations=max_iterations,
+        log_context=log_context,
     )
 
 
@@ -241,3 +244,86 @@ def test_run_tool_loop_when_api_call_raises_on_the_very_first_call_should_still_
     err = exc_info.value
     assert err.tool_calls == []
     assert isinstance(err.__cause__, anthropic.BadRequestError)
+
+
+def _submit(decision="ESCALATION_REQUIRED"):
+    return ScriptedResponse(
+        [
+            tool_use_block(
+                SUBMIT_RESOLUTION_TOOL_NAME,
+                {
+                    "reasoning_chain": ["..."],
+                    "action_taken": {"tools_called": [], "decision": decision, "refund_amount": None, "refund_id": None},
+                    "customer_response": "...",
+                },
+            )
+        ]
+    )
+
+
+def test_run_tool_loop_when_repeat_call_refused_should_log_warning(tool_schemas, tool_registry, caplog):
+    with caplog.at_level(logging.WARNING, logger="resolver_agent.tool_loop"):
+        _run(
+            [
+                ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+                ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),  # repeat
+                _submit(),
+            ],
+            tool_schemas,
+            tool_registry,
+        )
+
+    records = [r for r in caplog.records if r.getMessage() == "tool_loop.repeat_call_refused"]
+    assert len(records) == 1
+    assert records[0].fields["tool"] == "get_order_details"
+
+
+def test_run_tool_loop_when_unknown_tool_requested_should_log_warning(tool_schemas, tool_registry, caplog):
+    with caplog.at_level(logging.WARNING, logger="resolver_agent.tool_loop"):
+        _run(
+            [
+                ScriptedResponse([tool_use_block("delete_customer_account", {"user_id": "USR-101"})]),
+                _submit("CANNOT_RESOLVE"),
+            ],
+            tool_schemas,
+            tool_registry,
+        )
+
+    records = [r for r in caplog.records if r.getMessage() == "tool_loop.unknown_tool_requested"]
+    assert len(records) == 1
+    assert records[0].fields["tool"] == "delete_customer_account"
+
+
+def test_run_tool_loop_when_max_iterations_reached_should_log_warning(tool_schemas, tool_registry, caplog):
+    with caplog.at_level(logging.WARNING, logger="resolver_agent.tool_loop"):
+        _run(
+            [
+                ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+                ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1002"})]),
+                _submit(),
+            ],
+            tool_schemas,
+            tool_registry,
+            max_iterations=2,
+        )
+
+    assert any(r.getMessage() == "tool_loop.max_iterations_reached" for r in caplog.records)
+
+
+def test_run_tool_loop_when_log_context_given_should_be_merged_into_every_record(
+    tool_schemas, tool_registry, caplog
+):
+    with caplog.at_level(logging.DEBUG, logger="resolver_agent.tool_loop"):
+        _run(
+            [
+                ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+                _submit(),
+            ],
+            tool_schemas,
+            tool_registry,
+            log_context={"case_id": "test-case-42"},
+        )
+
+    tool_loop_records = [r for r in caplog.records if r.name == "resolver_agent.tool_loop"]
+    assert tool_loop_records  # sanity: at least the tool_executed DEBUG record fired
+    assert all(r.fields.get("case_id") == "test-case-42" for r in tool_loop_records)

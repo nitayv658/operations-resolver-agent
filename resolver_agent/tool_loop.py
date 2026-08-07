@@ -10,10 +10,15 @@ every agent in the team, swapping in only different prompts and tool sets.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 import anthropic
+
+from .logging_utils import get_logger, log_event
+
+_logger = get_logger(__name__)
 
 
 @dataclass
@@ -89,6 +94,7 @@ def run_tool_loop(
     max_iterations: int = 8,
     temperature: Optional[float] = None,
     max_tokens: int = 2048,
+    log_context: Optional[Dict[str, Any]] = None,
 ) -> ToolLoopResult:
     """Run send -> tool_use -> tool_result -> send until the model stops.
 
@@ -109,6 +115,7 @@ def run_tool_loop(
     a synthetic tool_result tells the model the retry was refused. This is
     what stops a confused agent from looping on the same failing call.
     """
+    ctx = log_context or {}
     seen_calls: set = set()
     tool_calls: List[ToolCallRecord] = []
     response = None
@@ -153,6 +160,7 @@ def run_tool_loop(
 
             sig = _signature(block.name, block.input)
             if sig in seen_calls:
+                log_event(_logger, logging.WARNING, "tool_loop.repeat_call_refused", tool=block.name, **ctx)
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -170,6 +178,7 @@ def run_tool_loop(
 
             fn = tool_registry.get(block.name)
             if fn is None:
+                log_event(_logger, logging.WARNING, "tool_loop.unknown_tool_requested", tool=block.name, **ctx)
                 result: Any = {
                     "error": "UNKNOWN_TOOL",
                     "message": f"No such tool: {block.name}",
@@ -181,6 +190,14 @@ def run_tool_loop(
                     raise ToolExecutionError(
                         f"Programmer error calling {block.name}({block.input!r}): {exc}"
                     ) from exc
+                log_event(
+                    _logger,
+                    logging.DEBUG,
+                    "tool_loop.tool_executed",
+                    tool=block.name,
+                    is_error=isinstance(result, dict) and "error" in result,
+                    **ctx,
+                )
 
             tool_calls.append(ToolCallRecord(block.name, block.input, result))
             tool_results.append(
@@ -197,6 +214,7 @@ def run_tool_loop(
             return ToolLoopResult(response, messages, tool_calls, "stop")
 
     if stop_tool_name is not None:
+        log_event(_logger, logging.WARNING, "tool_loop.max_iterations_reached", max_iterations=max_iterations, **ctx)
         response = _create(
             client,
             tool_calls,
