@@ -9,7 +9,7 @@ import os
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
 
@@ -44,6 +44,64 @@ DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 _max_retries_env = os.environ.get("ANTHROPIC_MAX_RETRIES")
 DEFAULT_MAX_RETRIES = int(_max_retries_env) if _max_retries_env else None
 
+# Every GlobalCart tool's successful result carries this field naming the
+# owning customer (confirmed by reading mock_services.py: get_order_details,
+# get_user_profile, check_return_policy and process_refund all include it).
+_OWNER_FIELD = "user_id"
+
+
+def _deny_unauthorized() -> Dict[str, Any]:
+    return {
+        "error": "NOT_AUTHORIZED",
+        "message": "This record does not belong to the requesting customer.",
+    }
+
+
+def _authorize_tool_registry(
+    tool_registry: Dict[str, Callable[..., Any]],
+    requester_user_id: str,
+    log_context: Dict[str, Any],
+) -> Dict[str, Callable[..., Any]]:
+    """Wrap every tool so a result belonging to a different customer than
+    ``requester_user_id`` is replaced with a NOT_AUTHORIZED error dict
+    before it ever reaches the model.
+
+    This is a prevention, not a detection -- the substitution happens at
+    the tool-dispatch boundary, so the real data never enters the model's
+    context in the first place, rather than being caught only in the final
+    customer-facing output. The NOT_AUTHORIZED shape matches every other
+    business failure in this codebase (an ``error`` key), so it needs no
+    special handling anywhere else: prompts.py's existing "if a tool result
+    contains an error key" rule and output_tool.py's existing "a tool
+    errored, no refund was processed" enforcement rule both already cover
+    it generically, with zero changes to either file.
+
+    Genuine tool errors (e.g. ORDER_NOT_FOUND) are untouched -- only a
+    successful result naming a *different* owner gets substituted.
+    """
+
+    def _wrap(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapped(**kwargs: Any) -> Any:
+            result = fn(**kwargs)
+            if isinstance(result, dict) and "error" not in result:
+                owner = result.get(_OWNER_FIELD)
+                if owner is not None and owner != requester_user_id:
+                    log_event(
+                        _logger,
+                        logging.WARNING,
+                        "agent.unauthorized_tool_result_denied",
+                        tool=name,
+                        record_owner=owner,
+                        requester_user_id=requester_user_id,
+                        **log_context,
+                    )
+                    return _deny_unauthorized()
+            return result
+
+        return wrapped
+
+    return {name: _wrap(name, fn) for name, fn in tool_registry.items()}
+
 
 class ResolverAgent:
     """A single autonomous agent that resolves one GlobalCart support ticket
@@ -69,8 +127,17 @@ class ResolverAgent:
         self.tool_schemas = list(gc.TOOL_SCHEMAS) + [SUBMIT_RESOLUTION_SCHEMA]
         self.tool_registry = dict(gc.TOOL_REGISTRY)
 
-    def resolve(self, ticket_text: str) -> Dict[str, Any]:
+    def resolve(self, ticket_text: str, requester_user_id: Optional[str] = None) -> Dict[str, Any]:
         """Resolve one support ticket end to end.
+
+        ``requester_user_id`` is the authenticated identity of whoever
+        submitted this ticket -- this package has no authentication of its
+        own (out of scope, an upstream concern), but if the caller supplies
+        one, any tool result naming a *different* owning customer is denied
+        (NOT_AUTHORIZED) before it ever reaches the model, rather than
+        merely flagged afterward. Omitting it (the default) reproduces
+        today's unrestricted behavior exactly -- e.g. an internal
+        ops-console context where any record is fair game.
 
         Returns the submit_resolution arguments (reasoning_chain,
         action_taken, customer_response) plus bookkeeping fields:
@@ -101,6 +168,10 @@ class ResolverAgent:
         ctx = {"case_id": case_id}
         messages: List[Dict[str, Any]] = [{"role": "user", "content": ticket_text}]
 
+        tool_registry = self.tool_registry
+        if requester_user_id is not None:
+            tool_registry = _authorize_tool_registry(self.tool_registry, requester_user_id, ctx)
+
         try:
             result = run_tool_loop(
                 client=self.client,
@@ -108,7 +179,7 @@ class ResolverAgent:
                 system=SYSTEM_PROMPT,
                 messages=messages,
                 tool_schemas=self.tool_schemas,
-                tool_registry=self.tool_registry,
+                tool_registry=tool_registry,
                 stop_tool_name=SUBMIT_RESOLUTION_TOOL_NAME,
                 max_iterations=self.max_iterations,
                 log_context=ctx,

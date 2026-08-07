@@ -253,3 +253,114 @@ def test_resolver_agent_when_max_iterations_is_not_positive_should_raise_at_cons
     # a misconfigured agent should never look like it was built successfully.
     with pytest.raises(ValueError, match="max_iterations"):
         ResolverAgent(client=ScriptedClient([]), max_iterations=bad_value)
+
+
+# --------------------------------------------------------------------------- #
+# requester_user_id / cross-customer authorization. ORD-1001 belongs to
+# USR-101 (Maya) in the real starter-kit fixtures.
+# --------------------------------------------------------------------------- #
+
+
+def test_authorize_tool_registry_when_owner_matches_requester_should_pass_through_real_data():
+    from resolver_agent.agent import _authorize_tool_registry, gc
+
+    registry = _authorize_tool_registry(dict(gc.TOOL_REGISTRY), requester_user_id="USR-101", log_context={})
+    result = registry["get_order_details"](order_id="ORD-1001")
+
+    assert result["order_id"] == "ORD-1001"
+    assert "error" not in result
+
+
+def test_authorize_tool_registry_when_owner_does_not_match_requester_should_deny():
+    from resolver_agent.agent import _authorize_tool_registry, gc
+
+    registry = _authorize_tool_registry(dict(gc.TOOL_REGISTRY), requester_user_id="USR-999", log_context={})
+    result = registry["get_order_details"](order_id="ORD-1001")  # actually belongs to USR-101
+
+    assert result == {
+        "error": "NOT_AUTHORIZED",
+        "message": "This record does not belong to the requesting customer.",
+    }
+
+
+def test_authorize_tool_registry_should_deny_across_all_four_tools_not_just_lookups():
+    # Every GlobalCart tool's successful result carries a user_id field --
+    # confirmed by reading mock_services.py -- so the same protection must
+    # cover check_return_policy/process_refund, not just the two obvious
+    # lookup tools.
+    from resolver_agent.agent import _authorize_tool_registry, gc
+
+    registry = _authorize_tool_registry(dict(gc.TOOL_REGISTRY), requester_user_id="USR-999", log_context={})
+
+    assert registry["get_user_profile"](user_id="USR-101")["error"] == "NOT_AUTHORIZED"
+    assert registry["check_return_policy"](order_id="ORD-1001")["error"] == "NOT_AUTHORIZED"
+    assert registry["process_refund"](order_id="ORD-1001", amount=35.0)["error"] == "NOT_AUTHORIZED"
+
+
+def test_authorize_tool_registry_should_not_mask_genuine_tool_errors():
+    # A nonexistent order must still surface as ORDER_NOT_FOUND, not get
+    # relabeled as an authorization failure.
+    from resolver_agent.agent import _authorize_tool_registry, gc
+
+    registry = _authorize_tool_registry(dict(gc.TOOL_REGISTRY), requester_user_id="USR-101", log_context={})
+    result = registry["get_order_details"](order_id="ORD-9999")
+
+    assert result["error"] == "ORDER_NOT_FOUND"
+
+
+def test_resolve_when_requester_user_id_matches_order_owner_should_proceed_normally():
+    client = ScriptedClient(
+        [
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+            _submit("ESCALATION_REQUIRED"),
+        ]
+    )
+    agent = ResolverAgent(client=client)
+    result = agent.resolve("My order ORD-1001 arrived damaged.", requester_user_id="USR-101")
+
+    order_call = next(c for c in result["_tool_calls"] if c["name"] == "get_order_details")
+    assert "error" not in order_call["result"]
+    assert order_call["result"]["order_id"] == "ORD-1001"
+
+
+def test_resolve_when_requester_user_id_does_not_match_order_owner_should_deny_and_log(caplog):
+    client = ScriptedClient(
+        [
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),  # belongs to USR-101
+            _submit("CANNOT_RESOLVE"),
+        ]
+    )
+    agent = ResolverAgent(client=client)
+
+    with caplog.at_level(logging.WARNING, logger="resolver_agent"):
+        result = agent.resolve("My order ORD-1001 arrived damaged.", requester_user_id="USR-999")
+
+    order_call = next(c for c in result["_tool_calls"] if c["name"] == "get_order_details")
+    assert order_call["result"] == {
+        "error": "NOT_AUTHORIZED",
+        "message": "This record does not belong to the requesting customer.",
+    }
+
+    records = [r for r in caplog.records if r.getMessage() == "agent.unauthorized_tool_result_denied"]
+    assert len(records) == 1
+    assert records[0].fields["tool"] == "get_order_details"
+    assert records[0].fields["requester_user_id"] == "USR-999"
+    assert records[0].fields["case_id"] == result["_case_id"]
+
+
+def test_resolve_when_requester_user_id_omitted_should_stay_unrestricted():
+    # Regression: the default (no requester binding) must behave exactly as
+    # it did before this change -- unrestricted access, every existing
+    # caller (run_scenarios.py, run_ticket.py, every other test in this
+    # suite) keeps working unchanged.
+    client = ScriptedClient(
+        [
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+            _submit("ESCALATION_REQUIRED"),
+        ]
+    )
+    agent = ResolverAgent(client=client)
+    result = agent.resolve("My order ORD-1001 arrived damaged.")
+
+    order_call = next(c for c in result["_tool_calls"] if c["name"] == "get_order_details")
+    assert "error" not in order_call["result"]
