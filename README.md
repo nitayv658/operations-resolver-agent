@@ -85,20 +85,33 @@ you should be able to check every line against the tool call log below it.
 
 The single most important failure mode called out in the brief is an agent
 that receives `ESCALATION_REQUIRED` from `process_refund` and still tells the
-customer "your refund has been processed." Two independent layers guard
+customer "your refund has been processed." Three independent layers guard
 against this:
 
 1. **Prompt-level**: `prompts.py` explicitly instructs the model to derive
    `decision` and `customer_response` from the actual last tool result, never
    from what it intended to happen.
-2. **Code-level**: `output_tool.validate_resolution()` cross-checks the
-   model's stated `decision` against the real `process_refund` result (and,
-   for orders/users that errored out, against whether a refund was ever
-   actually processed) after the fact. Any mismatch is surfaced in the output
-   as `_validation_warnings` — not silently auto-corrected, so a real
-   inconsistency stays visible instead of being hidden by a second LLM call
-   patching it over. This mirrors the same "guardrail lives in code, not in a
-   prompt" principle that `process_refund`'s own refund cap uses.
+2. **Schema-level**: `output_tool.validate_schema()` independently checks
+   that a `submit_resolution` call actually has every required field and
+   that `decision` is one of the four real values — not just trusting the
+   Anthropic API's own tool-schema constraint. A structurally invalid call
+   is treated exactly like the model never calling `submit_resolution` at
+   all, and falls back to the same safe, tested escalation.
+3. **Enforcement-level**: `output_tool.enforce_resolution()` cross-checks a
+   (structurally valid) resolution's stated `decision` against the real
+   `process_refund` result, and — this is the part that changed — **doesn't
+   just flag a mismatch, it corrects it.** If the model claims
+   `AUTO_REFUND_APPROVED` but `process_refund` actually returned
+   `ESCALATION_REQUIRED`, the returned `decision`, `refund_amount`,
+   `refund_id` and `customer_response` are deterministically overridden to
+   match the tool's ground truth before `resolve()` ever returns them — no
+   second LLM call, just a direct read of what the tool actually said. The
+   original inconsistency stays visible in `_validation_warnings` (what was
+   wrong) and `_corrections` (what was changed and why), so nothing is
+   silently hidden — it's just no longer possible for the wrong message to
+   be the one a caller actually receives. This mirrors the same "guardrail
+   lives in code, not in a prompt" principle that `process_refund`'s own
+   refund cap uses, applied one layer further out.
 
 ### Edge cases and guardrails
 

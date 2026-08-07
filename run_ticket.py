@@ -34,9 +34,14 @@ def main() -> int:
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
     if result.get("_validation_warnings"):
-        print("\n--- validation warnings ---", file=sys.stderr)
+        print("\n--- validation warnings (what the model got wrong) ---", file=sys.stderr)
         for warning in result["_validation_warnings"]:
             print(f"  ! {warning}", file=sys.stderr)
+
+    if result.get("_corrections"):
+        print("\n--- corrections (what was overridden before returning) ---", file=sys.stderr)
+        for correction in result["_corrections"]:
+            print(f"  > {correction}", file=sys.stderr)
 
     return 0
 
