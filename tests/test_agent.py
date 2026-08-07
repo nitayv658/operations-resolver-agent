@@ -115,10 +115,12 @@ def test_resolve_when_successful_should_log_info_with_case_id_and_decision(caplo
     assert records[0].fields["case_id"] == result["_case_id"]
 
 
-def test_resolve_when_validation_warnings_present_should_log_warning(caplog):
+def test_resolve_when_decision_contradicts_tool_result_should_correct_it_and_log_warning(caplog):
     # ORD-1011: $52 order, Standard $50 cap -- process_refund called with
-    # exactly 50.0 (the cap) instead of the true 52.0 owed triggers the
-    # under-request-to-dodge-escalation validator warning.
+    # exactly 50.0 (the cap) instead of the true 52.0 owed: the exact live
+    # under-request-to-dodge-escalation bug. resolve() must not just flag
+    # this -- it must deterministically correct the returned decision so
+    # the customer never sees the wrong outcome (output_tool.enforce_resolution).
     client = ScriptedClient(
         [
             ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1011"})]),
@@ -131,11 +133,81 @@ def test_resolve_when_validation_warnings_present_should_log_warning(caplog):
     with caplog.at_level(logging.WARNING, logger="resolver_agent"):
         result = agent.resolve("My order ORD-1011 arrived damaged, it cost $52.")
 
+    # the model's original (wrong) claim is still visible in _validation_warnings...
     assert result["_validation_warnings"]
-    records = [r for r in caplog.records if r.getMessage() == "agent.validation_warnings"]
+    assert any("under-requested the refund" in w for w in result["_validation_warnings"])
+    # ...but the RETURNED decision and customer-facing text reflect the correction, not the claim
+    assert result["action_taken"]["decision"] == "ESCALATION_REQUIRED"
+    assert result["action_taken"]["refund_amount"] is None
+    assert "escalated" in result["customer_response"].lower()
+    assert result["_corrections"]
+
+    records = [r for r in caplog.records if r.getMessage() == "agent.resolution_corrected"]
     assert len(records) == 1
     assert records[0].fields["case_id"] == result["_case_id"]
-    assert records[0].fields["warning_count"] == len(result["_validation_warnings"])
+    assert records[0].fields["correction_count"] == len(result["_corrections"])
+    assert records[0].fields["decision"] == "ESCALATION_REQUIRED"
+
+
+def test_resolve_when_submit_resolution_call_is_schema_invalid_should_fall_back_safely(caplog):
+    # A submit_resolution call with an out-of-enum decision -- the exact
+    # gap proven during the architecture review: previously this would have
+    # passed through validate_resolution with zero warnings. Now it must be
+    # treated exactly like "no call at all" and fall back safely.
+    client = ScriptedClient(
+        [
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_RESOLUTION_TOOL_NAME,
+                        {
+                            "reasoning_chain": ["..."],
+                            "action_taken": {"tools_called": [], "decision": "MAYBE_REFUND_LATER"},
+                            "customer_response": "...",
+                        },
+                    )
+                ]
+            )
+        ]
+    )
+    agent = ResolverAgent(client=client)
+
+    with caplog.at_level(logging.WARNING, logger="resolver_agent"):
+        result = agent.resolve("Hi, I have a problem with my order.")
+
+    assert result["action_taken"]["decision"] == "ESCALATION_REQUIRED"
+    assert "structurally invalid" in result["reasoning_chain"][0]
+    assert "MAYBE_REFUND_LATER" in result["reasoning_chain"][0]
+
+    records = [r for r in caplog.records if r.getMessage() == "agent.fallback_resolution_used"]
+    assert len(records) == 1
+    assert records[0].fields["schema_errors"] >= 1
+
+
+def test_resolve_when_submit_resolution_call_is_missing_customer_response_should_fall_back_safely():
+    # The other empirical review repro: a resolution missing required
+    # fields entirely must not flow through as an apparently clean result.
+    client = ScriptedClient(
+        [
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_RESOLUTION_TOOL_NAME,
+                        {
+                            "reasoning_chain": ["..."],
+                            "action_taken": {"tools_called": [], "decision": "ESCALATION_REQUIRED"},
+                            # customer_response deliberately omitted
+                        },
+                    )
+                ]
+            )
+        ]
+    )
+    agent = ResolverAgent(client=client)
+    result = agent.resolve("Hi, I have a problem with my order.")
+
+    assert result["action_taken"]["decision"] == "ESCALATION_REQUIRED"
+    assert isinstance(result["customer_response"], str) and result["customer_response"]
 
 
 def test_resolve_when_fallback_resolution_used_should_log_warning(caplog):

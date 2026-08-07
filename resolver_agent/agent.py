@@ -30,7 +30,8 @@ from .logging_utils import get_logger, log_event  # noqa: E402
 from .output_tool import (  # noqa: E402
     SUBMIT_RESOLUTION_SCHEMA,
     SUBMIT_RESOLUTION_TOOL_NAME,
-    validate_resolution,
+    enforce_resolution,
+    validate_schema,
 )
 from .prompts import SYSTEM_PROMPT  # noqa: E402
 from .tool_loop import ModelAPIError, ToolCallRecord, ToolLoopResult, run_tool_loop  # noqa: E402
@@ -76,8 +77,20 @@ class ResolverAgent:
         ``_case_id`` (a short id correlating this resolution's log lines),
         ``_tool_calls`` (a trace of every GlobalCart tool call made),
         ``_validation_warnings`` (any mismatch between the stated decision
-        and what the tools actually returned) and ``_stopped_reason``
-        (``"stop"``, ``"max_iterations"`` or ``"api_error"``).
+        and what the tools actually returned), ``_corrections`` (what was
+        deterministically overridden to fix a mismatch, if anything -- see
+        output_tool.enforce_resolution) and ``_stopped_reason`` (``"stop"``,
+        ``"max_iterations"`` or ``"api_error"``).
+
+        A resolution that is structurally invalid (missing required fields,
+        or a ``decision`` outside the four allowed values -- see
+        output_tool.validate_schema) is treated exactly like the model never
+        calling ``submit_resolution`` at all: discarded in favor of the same
+        safe fallback. A resolution that IS structurally valid but
+        contradicts what the tools actually returned is not just flagged --
+        ``enforce_resolution`` deterministically corrects the decision and
+        customer_response to match the tools' ground truth before this
+        method ever returns it.
 
         Only ``ModelAPIError`` -- a genuine API/infra failure, already
         distinguished by tool_loop.py from the SDK's own exhausted retries --
@@ -115,13 +128,20 @@ class ResolverAgent:
                 {"name": c.name, "input": c.input, "result": c.result} for c in exc.tool_calls
             ]
             resolution["_validation_warnings"] = []
+            resolution["_corrections"] = []
             resolution["_stopped_reason"] = "api_error"
             return resolution
 
-        resolution = self._extract_resolution(result.tool_calls)
-        used_fallback = resolution is None
-        if resolution is None:
-            resolution = self._fallback_resolution(result)
+        raw_resolution = self._extract_resolution(result.tool_calls)
+        schema_errors = validate_schema(raw_resolution) if raw_resolution is not None else None
+        used_fallback = raw_resolution is None or bool(schema_errors)
+
+        warnings: List[str] = []
+        corrections: List[str] = []
+        if used_fallback:
+            resolution = self._fallback_resolution(result, reason=schema_errors)
+        else:
+            resolution, warnings, corrections = enforce_resolution(raw_resolution, result.tool_calls)
 
         resolution["_case_id"] = case_id
         resolution["_tool_calls"] = [
@@ -129,17 +149,37 @@ class ResolverAgent:
             for c in result.tool_calls
             if c.name != SUBMIT_RESOLUTION_TOOL_NAME
         ]
-        resolution["_validation_warnings"] = validate_resolution(resolution, result.tool_calls)
+        resolution["_validation_warnings"] = warnings
+        resolution["_corrections"] = corrections
         resolution["_stopped_reason"] = result.stopped_reason
 
         if used_fallback:
-            log_event(_logger, logging.WARNING, "agent.fallback_resolution_used", stopped_reason=result.stopped_reason, **ctx)
-        elif resolution["_validation_warnings"]:
+            log_event(
+                _logger,
+                logging.WARNING,
+                "agent.fallback_resolution_used",
+                stopped_reason=result.stopped_reason,
+                schema_errors=len(schema_errors) if schema_errors else 0,
+                **ctx,
+            )
+        elif corrections:
+            log_event(
+                _logger,
+                logging.WARNING,
+                "agent.resolution_corrected",
+                correction_count=len(corrections),
+                decision=resolution.get("action_taken", {}).get("decision"),
+                **ctx,
+            )
+        elif warnings:
+            # Defensive fallback only -- given enforce_resolution corrects
+            # every condition it detects, this branch should be unreachable
+            # in practice, but stays as a safety net if that ever drifts.
             log_event(
                 _logger,
                 logging.WARNING,
                 "agent.validation_warnings",
-                warning_count=len(resolution["_validation_warnings"]),
+                warning_count=len(warnings),
                 decision=resolution.get("action_taken", {}).get("decision"),
                 **ctx,
             )
@@ -164,17 +204,34 @@ class ResolverAgent:
         return None
 
     @staticmethod
-    def _fallback_resolution(result: ToolLoopResult) -> Dict[str, Any]:
-        """The model never called submit_resolution -- not even when forced
-        to on the final turn (e.g. it produced plain text and stopped some
-        other way). The agent must still return something structured and
-        safe instead of raising, so it escalates rather than guessing.
+    def _fallback_resolution(result: ToolLoopResult, reason: Optional[List[str]] = None) -> Dict[str, Any]:
+        """A safe, structured escalation used for two distinct triggers:
+
+        1. The model never called submit_resolution -- not even when forced
+           to on the final turn (e.g. it produced plain text and stopped
+           some other way). ``reason`` is None; the reasoning_chain
+           explains this via ``stopped_reason``.
+        2. The model DID call submit_resolution, but the result failed
+           output_tool.validate_schema (missing required fields, or a
+           decision outside the four allowed values). ``reason`` carries
+           the schema errors, and a malformed call is treated exactly like
+           no call at all -- there's no sensible way to patch individual
+           fields on a structurally invalid resolution, so it's discarded
+           in favor of this same safe fallback.
+
+        Either way the agent must return something structured and safe
+        instead of raising or passing through a broken shape, so it
+        escalates rather than guessing.
         """
-        return {
-            "reasoning_chain": [
+        if reason:
+            explanation = f"The model's submit_resolution call was structurally invalid: {'; '.join(reason)}"
+        else:
+            explanation = (
                 "The agent did not produce a structured resolution within "
                 f"the allotted turns (stopped_reason={result.stopped_reason!r})."
-            ],
+            )
+        return {
+            "reasoning_chain": [explanation],
             "action_taken": {
                 "tools_called": [c.name for c in result.tool_calls],
                 "decision": "ESCALATION_REQUIRED",
