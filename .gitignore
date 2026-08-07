@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+
+# Raw saved snapshot of the quest brief webpage -- superseded by
+# docs/quest-brief/ (the actual source markdown from the quest's repo).
+Quest 4.html
+Quest 4_files/

@@ -1,0 +1,175 @@
+# Operations Resolver Agent
+
+Quest #4, Part 1 (Place-IL) — a single autonomous agent that resolves
+GlobalCart support tickets: it reads the ticket, calls tools to look up the
+order/customer/policy, decides on an operational outcome (auto-refund /
+reject / escalate), and returns structured, auditable output.
+
+The tool box and fixture data live in [`starter-kit/`](starter-kit/) and are
+**unmodified**, exactly as provided — see [`starter-kit/README.md`](starter-kit/README.md)
+for the tools themselves. Everything in this top-level README is the agent
+built *around* that starter kit. The original assignment brief is kept for
+reference in [`docs/quest-brief/`](docs/quest-brief/).
+
+---
+
+## Architecture
+
+**A hand-rolled Anthropic tool-use loop, no agent framework.** The starter
+kit's `TOOL_SCHEMAS` are already in the exact shape the Anthropic API expects,
+and the loop itself is short enough (`resolver_agent/tool_loop.py`) that a
+framework would mostly be hiding it rather than simplifying it — which is
+also the quest's own recommendation (see
+[`docs/quest-brief/agent-concepts-guide.md`](docs/quest-brief/agent-concepts-guide.md)).
+
+```
+resolver_agent/
+├── tool_loop.py    generic send -> tool_use -> tool_result -> send engine
+├── output_tool.py  the submit_resolution tool schema + a consistency validator
+├── prompts.py      the system prompt
+└── agent.py        ResolverAgent -- wires GlobalCart's 4 tools + submit_resolution
+                     into tool_loop, exposes .resolve(ticket_text)
+```
+
+`tool_loop.py` is deliberately generic — it knows nothing about GlobalCart,
+refunds, or JSON output shapes. It just runs the mechanical tool-calling
+cycle for whatever `tool_schemas` / `tool_registry` it's handed. That's on
+purpose: Part 2 turns this into a multi-agent team, and every agent in that
+team can reuse this same loop unchanged, swapping in only a different prompt
+and tool set.
+
+`agent.py` is the only file that knows this is GlobalCart: it builds the tool
+list (the 4 real tools from `mock_services.py` plus a 5th `submit_resolution`
+tool, see below), supplies the system prompt, and turns the loop's raw
+transcript into the three required output fields.
+
+The model decides itself which of the 4 GlobalCart tools to call and in what
+order — there is no hardcoded `order -> profile -> policy -> refund` pipeline
+in the code. A typical case does end up calling all four in roughly that
+order, but that's the model reasoning its way there via the tool
+descriptions, not a fixed control-flow path.
+
+### Forcing structured output: `submit_resolution` as a tool
+
+Asking a model to free-type JSON at the end and parsing it with regex is
+fragile — the quest's own guide calls this out explicitly as a common trap.
+Instead, the required output shape (`reasoning_chain`, `action_taken`,
+`customer_response`) is defined as a fifth tool, `submit_resolution`
+(`resolver_agent/output_tool.py`). The model calls it as an ordinary
+`tool_use` turn, so its arguments are already schema-validated by the API
+before this code ever inspects them — no regex, no "hope it parses."
+
+The model isn't forced to call it from turn one — it still has to decide on
+its own which real tools to investigate with first. The system prompt tells
+it to call `submit_resolution` last. As a safety net, if the loop is about to
+hit `max_iterations` without the model calling it, one final turn is made
+with `tool_choice` pinned to `submit_resolution`, so the agent always
+terminates with valid structured output instead of trailing off mid-thought.
+
+`action_taken.decision` has four values, not three — `AUTO_REFUND_APPROVED`,
+`REJECTED`, `ESCALATION_REQUIRED`, and `CANNOT_RESOLVE`. The fourth exists
+specifically for the hallucination-trap scenario: an order or user that
+simply doesn't exist is neither an approval, a policy rejection, nor a
+cap-based escalation, and forcing it into `REJECTED` would blur that
+distinction in the output.
+
+### Reasoning chain
+
+`reasoning_chain` is a list of strings the model is instructed (in
+`prompts.py`) to fill with concrete facts it actually saw in tool results —
+order IDs, dollar amounts, dates, policy IDs — rather than generic phrasing
+that could apply to any ticket. This is graded on whether it's *auditable*:
+you should be able to check every line against the tool call log below it.
+
+### Guarding against the decision/response gap
+
+The single most important failure mode called out in the brief is an agent
+that receives `ESCALATION_REQUIRED` from `process_refund` and still tells the
+customer "your refund has been processed." Two independent layers guard
+against this:
+
+1. **Prompt-level**: `prompts.py` explicitly instructs the model to derive
+   `decision` and `customer_response` from the actual last tool result, never
+   from what it intended to happen.
+2. **Code-level**: `output_tool.validate_resolution()` cross-checks the
+   model's stated `decision` against the real `process_refund` result (and,
+   for orders/users that errored out, against whether a refund was ever
+   actually processed) after the fact. Any mismatch is surfaced in the output
+   as `_validation_warnings` — not silently auto-corrected, so a real
+   inconsistency stays visible instead of being hidden by a second LLM call
+   patching it over. This mirrors the same "guardrail lives in code, not in a
+   prompt" principle that `process_refund`'s own refund cap uses.
+
+### Edge cases and guardrails
+
+| Case | How it's handled |
+|---|---|
+| Refund request above the auto-approval cap | `process_refund` itself refuses and returns `ESCALATION_REQUIRED` — no prompt can talk it past the cap. The agent's job is only to recognize and report that honestly. |
+| Return requested outside the window | `check_return_policy` returns `OUTSIDE_RETURN_WINDOW` citing `POL-RET-01`/`POL-RET-02`; the agent rejects and quotes the policy id. |
+| Order or user that doesn't exist (hallucination trap) | Tools return `{"error": "ORDER_NOT_FOUND"/"USER_NOT_FOUND", ...}`. The system prompt instructs the agent to treat that key as a stop signal, not something to paper over with invented data — `decision` becomes `CANNOT_RESOLVE`. |
+| Malformed input (negative amount, invalid reason, non-existent order passed to `process_refund`) | The tools return structured `{"error": ...}` dicts rather than raising; the agent reads the error and reports it instead of crashing or retrying blindly. |
+| Repeating the same tool call | `tool_loop.py` tracks `(tool_name, args)` signatures already seen and refuses to re-execute an identical call, feeding back a message telling the model to stop retrying and act on what it already has. |
+| Runaway loop | `max_iterations` (default 8) caps the number of tool-calling rounds; if hit, the loop forces a final `submit_resolution` call so the agent still returns a safe, structured answer (defaulting to escalation) instead of hanging. |
+
+---
+
+## Setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+# then edit .env and set ANTHROPIC_API_KEY
+```
+
+## Running it
+
+**1. Sanity-check the (unmodified) starter kit first** — this only tests the
+deterministic data/rule engine, not the agent:
+
+```bash
+python3 starter-kit/examples/verify_scenarios.py
+# All 33 checks passed.
+```
+
+**2. Resolve a single ticket:**
+
+```bash
+python3 run_ticket.py "Hi, I'm Maya. My earbuds from order ORD-1001 arrived cracked right out of the box. Can you sort this out?"
+```
+
+Prints the full structured JSON result to stdout (validation warnings, if
+any, go to stderr).
+
+**3. Run the full regression suite** — the agent against all 9 scenarios from
+[`starter-kit/examples/scenarios.md`](starter-kit/examples/scenarios.md)
+(scenarios 5 and 7 are each two orders in the brief, so this runs 10 tickets
+covering all nine):
+
+```bash
+python3 run_scenarios.py
+```
+
+This is deliberately a *different* kind of check than
+`starter-kit/examples/verify_scenarios.py`: that script tests whether the
+data and rule engine are internally consistent (no LLM involved — it will
+pass identically every time). `run_scenarios.py` tests whether the *agent*,
+reading natural-language tickets and choosing its own tool calls, reaches the
+same correct outcomes — which can vary run to run since it goes through a
+live model call.
+
+---
+
+## Demo video
+
+*(optional, ≤2 min — add a link here showing a happy-path run and an
+edge-case run via `run_ticket.py` or `run_scenarios.py`)*
+
+---
+
+## A note on the fixtures
+
+The brief asks us to flag rather than edit anything that looks off in
+`starter-kit/data/`. Nothing was found that needed flagging — all 33 checks
+in `verify_scenarios.py` pass against the fixtures as provided.

@@ -1,0 +1,5 @@
+# Runtime dependencies for the Operations Resolver Agent itself.
+# (starter-kit/requirements.txt is separate -- it's only for the optional
+# Swagger API-docs server that ships with the starter kit.)
+anthropic>=0.40
+python-dotenv>=1.0
