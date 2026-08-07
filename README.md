@@ -113,6 +113,33 @@ against this:
    lives in code, not in a prompt" principle that `process_refund`'s own
    refund cap uses, applied one layer further out.
 
+### Requester identity and cross-customer authorization
+
+By default `resolve(ticket_text)` will look up whatever `order_id`/`user_id`
+the model finds in the ticket text, with no check on whether it belongs to
+whoever actually submitted the ticket — appropriate for an internal
+ops-console context, but a real gap for a customer-facing deployment. Passing
+`resolve(ticket_text, requester_user_id="USR-101")` closes it: every
+GlobalCart tool's successful result carries a `user_id` field naming the
+owning customer (confirmed directly against `mock_services.py` — all four
+tools include it, not just the two obvious lookups), so
+`agent._authorize_tool_registry()` wraps all four and substitutes a
+`{"error": "NOT_AUTHORIZED", ...}` dict whenever a result's owner doesn't
+match the requester — **before** the real data ever reaches the model's
+context, not just filtered out of the final customer-facing text. Because
+`NOT_AUTHORIZED` uses the same `error`-key shape as every other business
+failure in this codebase, it needs no special-casing anywhere else:
+`prompts.py`'s existing "if a tool result contains an error key" rule and
+`output_tool.py`'s existing "a tool errored, no refund was processed"
+enforcement rule both already cover it for free. Omitting
+`requester_user_id` (the default) reproduces today's unrestricted behavior
+exactly, so no existing caller needed to change. Try it:
+
+```bash
+python3 run_ticket.py "My order ORD-1001 arrived damaged." USR-999   # USR-999 doesn't own ORD-1001 -- denied
+python3 run_ticket.py "My order ORD-1001 arrived damaged." USR-101   # USR-101 does -- proceeds normally
+```
+
 ### Edge cases and guardrails
 
 | Case | How it's handled |

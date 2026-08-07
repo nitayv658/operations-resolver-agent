@@ -3,6 +3,9 @@
 
 Usage:
     python3 run_ticket.py "Hi, I'm Maya. My earbuds from order ORD-1001 ..."
+    python3 run_ticket.py "..." USR-101   # bind to a requester identity --
+                                           # any record naming a different
+                                           # owner gets denied, not disclosed
 
 Requires ANTHROPIC_API_KEY to be set (in the environment or in a .env file --
 see .env.example).
@@ -25,12 +28,13 @@ def main() -> int:
     configure_logging()
 
     if len(sys.argv) < 2:
-        print(f"Usage: python3 {sys.argv[0]} \"<ticket text>\"", file=sys.stderr)
+        print(f"Usage: python3 {sys.argv[0]} \"<ticket text>\" [requester_user_id]", file=sys.stderr)
         return 2
 
     ticket_text = sys.argv[1]
+    requester_user_id = sys.argv[2] if len(sys.argv) > 2 else None
     agent = ResolverAgent()
-    result = agent.resolve(ticket_text)
+    result = agent.resolve(ticket_text, requester_user_id=requester_user_id)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
     if result.get("_validation_warnings"):
