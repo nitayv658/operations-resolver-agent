@@ -194,8 +194,21 @@ boundaries of a single-ticket resolver (Quest #4 Part 1), not oversights:
   run, by the README's own admission), but every real tool call + result is preserved in
   `_tool_calls`, so you can audit what the agent saw. Deterministic replay only exists for
   *mechanics* testing, via `ScriptedClient` faking the model's responses exactly.
-- **No aggregate success tracking.** `run_scenarios.py` is a spot-check against 9 known scenarios,
-  not continuous monitoring; structured logs are per-case (`_case_id`), nothing rolls them up.
+- **No aggregate success tracking, and no CI running any of the three test tiers** (confirmed: no
+  `.github/` or other CI config in the repo). `run_scenarios.py` is a manually-triggered,
+  point-in-time spot-check against 10 tickets covering the 9 brief scenarios -- its result isn't
+  stored anywhere once the terminal closes, so there's no actual trend data, only whatever a human
+  happens to remember across runs. Its pass condition is stricter than "got the right answer":
+  `decision == expected` **and** `_validation_warnings` is empty (`run_scenarios.py`'s own check).
+  That second half matters because `enforce_resolution()` auto-corrects a wrong decision before
+  it's returned -- so a scenario the model judged wrong but the code silently fixed would show the
+  *correct* final decision, yet `run_scenarios.py` still counts it a failure, because it's
+  deliberately measuring the model's raw judgment quality, not the corrected output. The structured
+  log events already give the categorical material for a real over-time metric, unused today:
+  `agent.case_resolved` (clean), `agent.resolution_corrected` (model was wrong, code fixed it),
+  `agent.fallback_resolution_used` (model produced nothing usable), `agent.api_error` (infra, not
+  judgment) -- aggregating these across cases would be the natural first step toward one, but
+  nothing in this repo currently ships or aggregates the logs anywhere.
 
 ## How to respond, by request type
 
