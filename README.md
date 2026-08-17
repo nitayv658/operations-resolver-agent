@@ -49,6 +49,21 @@ in the code. A typical case does end up calling all four in roughly that
 order, but that's the model reasoning its way there via the tool
 descriptions, not a fixed control-flow path.
 
+### Prompt caching
+
+The Anthropic API is stateless — every round-trip within one `resolve()` call
+resends the full transcript, and the system prompt and 5-tool list are
+identical on every one of those round-trips (neither changes mid-case).
+`tool_loop.py` marks both with an Anthropic `cache_control` breakpoint
+(`_cacheable_system` / `_cacheable_tools`), computed once per call and reused
+for every round including the forced final one, so rounds after the first
+reuse the cached prefix instead of the model reprocessing it from scratch.
+Both helpers build new objects rather than mutating the caller's
+`tool_schemas` in place — that list is built once in `ResolverAgent.__init__`
+and reused across every `resolve()` call on the same instance, so mutating it
+would leak a stale breakpoint (or worse, shared state) across unrelated
+tickets.
+
 ### Forcing structured output: `submit_resolution` as a tool
 
 Asking a model to free-type JSON at the end and parsing it with regex is
