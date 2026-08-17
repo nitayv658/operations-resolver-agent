@@ -168,6 +168,56 @@ def test_run_tool_loop_when_model_ignores_forced_stop_should_still_terminate_wit
     assert not any(c.name == SUBMIT_RESOLUTION_TOOL_NAME for c in result.tool_calls)
 
 
+def test_run_tool_loop_should_add_cache_control_breakpoints_to_system_and_tools(
+    tool_schemas, tool_registry
+):
+    """Anthropic prompt caching needs a cache_control breakpoint on the
+    content that's identical across round-trips -- here that's the whole
+    system prompt and the full tool list, since neither changes within one
+    resolve() call. This proves the loop marks both, on every round
+    (including the forced final call), without mutating the caller's
+    tool_schemas list -- that list is built once in ResolverAgent.__init__
+    and reused across every resolve() call on that instance, so mutating it
+    in place would leak state across unrelated tickets.
+    """
+    client = ScriptedClient(
+        [
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+            # forced final call: model still doesn't comply, just talks
+            ScriptedResponse([text_block("thinking...")], stop_reason="end_turn"),
+        ]
+    )
+    original_schemas = [dict(s) for s in tool_schemas]  # snapshot before the call
+
+    run_tool_loop(
+        client=client,
+        model="mock",
+        system="You are a test agent.",
+        messages=[{"role": "user", "content": "(scripted ticket)"}],
+        tool_schemas=tool_schemas,
+        tool_registry=tool_registry,
+        stop_tool_name=SUBMIT_RESOLUTION_TOOL_NAME,
+        max_iterations=1,
+    )
+
+    assert client.calls == 2  # the one round + the forced final call
+    for kwargs in client.call_kwargs:
+        assert kwargs["system"] == [
+            {
+                "type": "text",
+                "text": "You are a test agent.",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        sent_tools = kwargs["tools"]
+        assert len(sent_tools) == len(tool_schemas)
+        assert sent_tools[-1]["cache_control"] == {"type": "ephemeral"}
+        assert all("cache_control" not in t for t in sent_tools[:-1])
+
+    # the caller's own tool_schemas list/dicts must be untouched
+    assert tool_schemas == original_schemas
+
+
 def test_run_tool_loop_when_model_names_unknown_tool_should_return_error_dict_without_crashing(
     tool_schemas, tool_registry
 ):

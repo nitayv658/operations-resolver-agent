@@ -66,6 +66,7 @@ class ScriptedClient:
     def __init__(self, script: List[Union[ScriptedResponse, BaseException]]):
         self._script: List[Union[ScriptedResponse, BaseException]] = list(script)
         self.calls = 0
+        self.call_kwargs: List[Dict[str, Any]] = []
 
     class _Messages:
         def __init__(self, outer: "ScriptedClient"):
@@ -73,6 +74,7 @@ class ScriptedClient:
 
         def create(self, **kwargs: Any) -> ScriptedResponse:
             self._outer.calls += 1
+            self._outer.call_kwargs.append(kwargs)
             if not self._outer._script:
                 raise AssertionError(
                     "ScriptedClient ran out of scripted responses -- the loop "

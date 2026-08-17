@@ -82,6 +82,36 @@ def _create(client: "anthropic.Anthropic", tool_calls_so_far: List[ToolCallRecor
         raise ModelAPIError(list(tool_calls_so_far), exc) from exc
 
 
+def _cacheable_system(system: str) -> List[Dict[str, Any]]:
+    """Wrap the system prompt as a content block with a cache_control
+    breakpoint, instead of passing it as the bare string the API also
+    accepts.
+
+    The system prompt is identical on every round-trip within one
+    run_tool_loop call (it never changes mid-case), which is exactly what
+    Anthropic prompt caching is for: rounds 2+ can reuse the cached prefix
+    instead of the model re-processing it from scratch.
+    """
+    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
+
+def _cacheable_tools(tool_schemas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return a copy of ``tool_schemas`` with a cache_control breakpoint on
+    the last entry -- Anthropic caches everything up to and including the
+    last breakpoint, so one on the final tool covers the whole list.
+
+    Builds a new list (and a new dict for the last entry) rather than
+    mutating ``tool_schemas`` in place: that list is built once in
+    ResolverAgent.__init__ and reused across every resolve() call on that
+    instance, so mutating it here would leak state across unrelated tickets.
+    """
+    if not tool_schemas:
+        return tool_schemas
+    cached = list(tool_schemas)
+    cached[-1] = {**cached[-1], "cache_control": {"type": "ephemeral"}}
+    return cached
+
+
 def run_tool_loop(
     client: "anthropic.Anthropic",
     model: str,
@@ -134,6 +164,11 @@ def run_tool_loop(
     # Some models (e.g. claude-sonnet-5) reject an explicit `temperature` --
     # only pass it through when the caller actually asked for one.
     extra_kwargs = {} if temperature is None else {"temperature": temperature}
+    # Computed once: system and tool_schemas don't change between rounds
+    # within one run_tool_loop call, so every round (including the forced
+    # final call) reuses the exact same cache_control breakpoints.
+    cached_system = _cacheable_system(system)
+    cached_tools = _cacheable_tools(tool_schemas)
 
     for _ in range(max_iterations):
         response = _create(
@@ -141,9 +176,9 @@ def run_tool_loop(
             tool_calls,
             model=model,
             max_tokens=max_tokens,
-            system=system,
+            system=cached_system,
             messages=messages,
-            tools=tool_schemas,
+            tools=cached_tools,
             **extra_kwargs,
         )
 
@@ -232,9 +267,9 @@ def run_tool_loop(
             tool_calls,
             model=model,
             max_tokens=max_tokens,
-            system=system,
+            system=cached_system,
             messages=messages,
-            tools=tool_schemas,
+            tools=cached_tools,
             tool_choice={"type": "tool", "name": stop_tool_name},
             **extra_kwargs,
         )
