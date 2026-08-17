@@ -174,19 +174,43 @@ boundaries of a single-ticket resolver (Quest #4 Part 1), not oversights:
   `client`/`tool_schemas`/`tool_registry`, never conversation state). Even the tools are stateless:
   `process_refund`'s own docstring says "nothing is written to disk" -- there's no history of prior
   tickets anywhere.
-- **No concurrency handling.** Nothing in the repo runs concurrently today (`run_scenarios.py`
-  loops sequentially); `resolve()` has no locking because it doesn't mutate shared state per call,
-  but that's incidental, not a designed-for guarantee.
-- **No OAuth, because no third-party account integration exists.** The only credential is
-  `ANTHROPIC_API_KEY` from a git-ignored `.env` (`load_dotenv()` in `agent.py`).
+- **No concurrency handling, though it's incidentally safe by inspection, not by design.** Nothing
+  in the repo runs concurrently today (`run_scenarios.py` loops sequentially, one process per
+  ticket in `run_ticket.py`). If you did call `resolve()` from multiple threads on the same
+  `ResolverAgent`: every call builds fully local state (`messages`, `case_id` -- `agent.py`), and
+  `_authorize_tool_registry()` returns a **new** wrapped dict per call rather than mutating
+  `self.tool_registry`, so two concurrent calls with different `requester_user_id`s don't leak
+  registries into each other. `mock_services.py` itself has no shared mutable state that could
+  race -- `refund_id` is computed deterministically from `order_id`/`amount`
+  (`starter-kit/mock_services.py:532`), not an incrementing counter; the one real piece of shared
+  state is `_load()`'s `@lru_cache(maxsize=None)` (`starter-kit/mock_services.py:67-68`), safe only
+  because CPython's `lru_cache` is internally lock-protected, not because this was built with
+  concurrency in mind. None of this is tested for concurrency, and nothing addresses a
+  *business-level* race (two tickets about the same order deciding to refund it at the same
+  moment) -- `process_refund` is stateless and simulated, so there's no ledger anywhere that would
+  even notice.
+- **No OAuth, because no third-party account integration exists.** The only credential is a static
+  `ANTHROPIC_API_KEY` bearer secret (no grant flow, refresh, scopes, or expiry) from a git-ignored
+  `.env` (`load_dotenv()` in `agent.py`, called before `import anthropic`; the SDK reads the env
+  var itself -- `agent.py` never passes `api_key=` explicitly or touches the raw value).
   `requester_user_id` is authorization (which records can this case touch), not authentication --
-  the docstring says outright that authenticating the caller is "out of scope, an upstream concern."
+  it's an unverified string claim the caller supplies; the docstring says outright that
+  authenticating the real caller is "out of scope, an upstream concern," so the whole authorization
+  boundary is only as trustworthy as whatever upstream system passes the correct identity through.
 - **Prompt injection:** the ticket text is untrusted and goes straight into the first user message,
-  unsanitized. What actually limits the blast radius: `process_refund` enforces its cap in code
-  regardless of what the model is talked into asking for; `enforce_resolution()` deterministically
-  overrides a talked-into-it-wrong `decision` before it leaves `resolve()`; and the authorization
-  wrapper stops a crafted ticket from fishing out another customer's data. Nothing stops the
-  model's *tone* from being steered, but the one tool with real effect can't be argued past its cap.
+  unsanitized -- and the defense is downstream, not input filtering. `process_refund` enforces its
+  cap in code regardless of what the model is talked into requesting (its own description says it
+  "re-validates the rulebook," `starter-kit/mock_services.py:632-637`); `enforce_resolution()`
+  deterministically overrides a talked-into-it-wrong `decision` before it leaves `resolve()`; and a
+  crafted "tool result" can't be smuggled into the transcript via ticket text at all -- the only
+  `tool_result` content that ever appears in `messages` comes from `tool_loop.py` actually
+  dispatching a real call and stringifying its real result (`tool_loop.py:186-221`), never from
+  user-supplied text. **Important caveat:** the cross-customer data-fishing defense (the
+  authorization wrapper) only applies when the caller supplies `requester_user_id` -- in the
+  default unrestricted mode, a ticket fishing for another customer's order/profile data is **not**
+  defended against at all; that protection is conditional on upstream integration, not a universal
+  guarantee. Nothing defends the model's *tone* or being talked into pointless investigation either
+  -- that's a cost concern (bounded by `max_iterations`/`max_tokens`), not a security one.
 - **Cost/runaway control is `max_iterations` + `max_tokens` only.** No cross-case token budget, no
   wall-clock timeout, no cost tracking. Hitting the cap doesn't hang -- it forces one last
   `submit_resolution` call, which is what actually bounds worst-case cost.
