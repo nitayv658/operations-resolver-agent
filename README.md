@@ -5,6 +5,8 @@ GlobalCart support tickets: it reads the ticket, calls tools to look up the
 order/customer/policy, decides on an operational outcome (auto-refund /
 reject / escalate), and returns structured, auditable output.
 
+> 🇮🇱 גרסה עברית: [`README.he.md`](README.he.md) — same content, same structure.
+
 The tool box and fixture data live in [`starter-kit/`](starter-kit/) and are
 **unmodified**, exactly as provided — see [`starter-kit/README.md`](starter-kit/README.md)
 for the tools themselves. Everything in this top-level README is the agent
@@ -15,12 +17,20 @@ reference in [`docs/quest-brief/`](docs/quest-brief/).
 
 ## Architecture
 
-**A hand-rolled Anthropic tool-use loop, no agent framework.** The starter
-kit's `TOOL_SCHEMAS` are already in the exact shape the Anthropic API expects,
-and the loop itself is short enough (`resolver_agent/tool_loop.py`) that a
-framework would mostly be hiding it rather than simplifying it — which is
-also the quest's own recommendation (see
-[`docs/quest-brief/agent-concepts-guide.md`](docs/quest-brief/agent-concepts-guide.md)).
+**A hand-rolled Anthropic tool-use loop, no agent framework.** The starter kit
+is framework-agnostic by design — its own README ships ready-made adapters for
+LangChain, CrewAI, PydanticAI and OpenAI Tools — so this was a choice, not a
+constraint. Two reasons for it: the kit's `TOOL_SCHEMAS` are already in the
+exact shape the Anthropic API expects (its README says so outright: *"TOOL_SCHEMAS
+is already in the right shape"*), which removes the schema-translation layer a
+framework mostly exists to provide; and what's left, the loop itself, is 202
+lines of code (`resolver_agent/tool_loop.py`) and is exactly where every graded
+guardrail lives — the forced final `submit_resolution` call, the repeat-call
+refusal, the cross-customer denial at the dispatch boundary, and the typed
+`ModelAPIError` that preserves a partial tool trace. A framework would hide that
+loop rather than simplify it. The quest brief itself is neutral on the question
+(see [`docs/quest-brief/agent-concepts-guide.md`](docs/quest-brief/agent-concepts-guide.md),
+reading-list item #7).
 
 ```
 resolver_agent/
@@ -63,6 +73,136 @@ Both helpers build new objects rather than mutating the caller's
 and reused across every `resolve()` call on the same instance, so mutating it
 would leak a stale breakpoint (or worse, shared state) across unrelated
 tickets.
+
+### The tools: four from the starter kit, one of ours
+
+The first four come from `starter-kit/mock_services.py` **unmodified**, via its
+`TOOL_SCHEMAS` and `TOOL_REGISTRY`. They're listed in the order an agent
+normally uses them — but again, that's the order the model tends to arrive at,
+not an order written into the code.
+
+| # | Tool | What it answers | Input | What comes back |
+|---|---|---|---|---|
+| 1 | `get_order_details` | What was ordered, when it arrived, what condition it arrived in | `order_id` | Shipping status, order/delivery dates, total amount, the items and the condition each arrived in, address and whether it changed after the order |
+| 2 | `get_user_profile` | Who the customer is, their tier, refund history, risk | `user_id` | Tier (VIP → longer return window, higher cap), account age, LTV, refund history, prior fraud flags, fraud score |
+| 3 | `check_return_policy` | Is this claim still eligible, and under which policy | `order_id`, `reason` | `eligible` + `verdict` (`ELIGIBLE` / `OUTSIDE_RETURN_WINDOW` / `NON_RETURNABLE_CATEGORY` / `ORDER_NOT_REFUNDABLE`), `applicable_policies`, `auto_refund_cap_usd`, `max_refundable_amount`, `requires_escalation` + `escalation_reasons`, `return_window_days` / `days_since_delivery` / `days_remaining_in_window`, `explanation` |
+| 4 | `process_refund` | Issue the refund — or refuse and demand escalation | `order_id`, `amount`, `reason` | `status`: `APPROVED` / `REJECTED` / `ESCALATION_REQUIRED`, alongside `approved_amount`, `refund_id`, `requested_amount`, `auto_refund_cap_usd`, `applicable_policies`, `reasons`, `message` |
+| 5 | `submit_resolution` | **Ours** — record the final resolution and end the case | `reasoning_chain`, `action_taken`, `customer_response` | No business result; it's the loop's "I'm done" signal (see below) |
+
+Three facts about that contract drive the rest of the design:
+
+| Fact | Consequence for the agent |
+|---|---|
+| `process_refund` is the **only tool with a side effect** | It's also the only one the final decision is cross-checked against, in `enforce_resolution` |
+| The cap is enforced **inside the tool**, not in the prompt | A request above the cap returns `ESCALATION_REQUIRED`; no prompt talks it into `APPROVED` |
+| A business failure is **data, not an exception** | `{"error": "ORDER_NOT_FOUND" / "USER_NOT_FOUND" / "INVALID_AMOUNT", "message": ...}` flows back to the model as an ordinary `tool_result` |
+
+The tool *descriptions* were left untouched, and that matters: the quest's guide
+says that if an agent picks the wrong tool, the fix belongs in the tool
+description rather than the system prompt. The kit's descriptions are already
+written that way — each says both *what* the tool does and *when* to call it
+("Call this first for any ticket that mentions an order", "Call this before
+promising the customer anything", "Call it only after check_return_policy
+reported the claim eligible"). That's exactly why `prompts.py` is short: it
+carries only what a tool description can't express — the agent's authority, and
+the behavioral rules that keep it honest about what the tools actually said.
+
+#### A real example: the tools in use
+
+A table is a description; here's what actually happens. Every value below came
+from calling the real starter-kit tools, not from memory. They're deterministic
+— dates are computed against a fixed `reference_date() == 2026-08-05` (brief §5)
+— and side-effect free, so all of it is reproducible with no API key.
+
+> **What's fixed and what isn't:** the tool results below are exact and stable.
+> The *sequence* is the run the model typically produces, not a guaranteed
+> pipeline — as stated above, call order is the model's decision at runtime.
+
+**🟢 Case 1 — the clean path (`ORD-1001`)**
+
+Ticket: *"My earbuds from order ORD-1001 arrived cracked right out of the box."*
+
+| # | Call | What came back |
+|---|---|---|
+| 1 | `get_order_details({order_id: "ORD-1001"})` | `user_id=USR-101`, `status=delivered`, `total_amount=35.0`, item condition `damaged_on_arrival` |
+| 2 | `get_user_profile({user_id: "USR-101"})` | `tier=VIP`, `prior_fraud_flags=0`, `lifetime_value=4820.5` |
+| 3 | `check_return_policy({order_id, reason: "damaged_on_arrival"})` | `eligible=true`, `verdict=ELIGIBLE`, `45`-day window (`11` elapsed, `34` left), `auto_refund_cap_usd=75.0`, `max_refundable_amount=35.0`, `applicable_policies=[POL-RET-02, POL-REF-02]` |
+| 4 | `process_refund({order_id, amount: 35.0, reason})` | `status=APPROVED`, `approved_amount=35.0`, `refund_id=RF-1001-3500` |
+
+Then `submit_resolution`, and what `resolve()` returns:
+
+```json
+{
+  "reasoning_chain": [
+    "ORD-1001 was delivered on 2026-07-25; one item (SKU-HDPH-01, 35.00 USD) is flagged damaged_on_arrival.",
+    "USR-101 is a VIP customer with no prior fraud flags — 45-day window, 75.00 USD cap.",
+    "check_return_policy returned ELIGIBLE: 11 days since delivery, 34 remaining (POL-RET-02, POL-REF-02).",
+    "process_refund for 35.00 USD returned APPROVED with refund_id RF-1001-3500."
+  ],
+  "action_taken": {
+    "tools_called": ["get_order_details", "get_user_profile", "check_return_policy", "process_refund"],
+    "decision": "AUTO_REFUND_APPROVED",
+    "refund_amount": 35.0,
+    "refund_id": "RF-1001-3500"
+  },
+  "customer_response": "Hi Maya, sorry the earbuds turned up cracked...",
+  "_case_id": "…", "_tool_calls": [ … ], "_validation_warnings": [], "_corrections": [], "_stopped_reason": "stop"
+}
+```
+
+That's the test for `reasoning_chain`: every line is checkable against a row in
+the table above — date, amount, policy id, `refund_id`. This is the difference
+between an auditable chain and generic phrasing that would fit any ticket.
+
+**🟡 Case 2 — authority breach (`ORD-1002`)**
+
+The first three calls are the same shape. The divergence is the cap:
+
+| Call | What came back |
+|---|---|
+| `get_order_details` | `total_amount=150.0` |
+| `get_user_profile` | `tier=Standard` → a `50.0` cap, not `75.0` |
+| `check_return_policy` | `eligible=true`, `verdict=ELIGIBLE`, `requires_escalation=false` — but `auto_refund_cap_usd=50.0` and `max_refundable_amount=50.0` |
+| `process_refund({amount: 150.0})` | `status=ESCALATION_REQUIRED`, `approved_amount=0.0`, **no `refund_id`** |
+
+The tool's own message: *"Refund not issued. 150.00 USD exceeds your automatic
+authority of 50.00 USD — escalate to a human operations lead."*
+
+Note the distinction: `check_return_policy` said `ELIGIBLE` with
+`requires_escalation=false`. **Eligibility and authority are different
+questions** — the claim is entirely legitimate, it's just above what the agent
+may approve alone. An agent that reads `eligible=true` and skips the actual
+`process_refund` result will promise a refund that never happened.
+
+**🔴 Why that needs a guardrail in our code**
+
+What if the agent asks for exactly the cap instead of the real amount? Checked
+against the real tool:
+
+```
+process_refund({order_id: "ORD-1002", amount: 50.0})
+  → status: APPROVED, approved_amount: 50.0, refund_id: "RF-1002-5000"
+```
+
+**`APPROVED`.** The tool can't tell an honest $50 claim from an agent shaving its
+request to dodge escalation — its cap is enforced, but intent isn't. That's
+exactly what `output_tool.py:251-281` is for: it spots `requested_amount == cap`
+below the order total and overrides back to `ESCALATION_REQUIRED`. The sharpest
+illustration that the kit's guardrail doesn't excuse us from having our own.
+
+**⚫ Case 3 — the hallucination trap (`ORD-2222`)**
+
+One call, and that's the run:
+
+```
+get_order_details({order_id: "ORD-2222"})
+  → {"error": "ORDER_NOT_FOUND", "message": "No order found with id 'ORD-2222'."}
+```
+
+No further tool calls. No invented delivery date, no `process_refund` against an
+order that doesn't exist. `prompts.py` rule 2 tells the agent to treat the
+`error` key as a stop signal, and the decision comes out `CANNOT_RESOLVE` —
+precisely why that fourth value exists.
 
 ### Forcing structured output: `submit_resolution` as a tool
 
@@ -261,8 +401,8 @@ LOG_LEVEL=INFO python3 run_ticket.py "..."   2> >(jq .)   # pretty-print the log
 |---|---|---|
 | `DEBUG` | `tool_loop.tool_executed` | every real GlobalCart tool call |
 | `WARNING` | `tool_loop.repeat_call_refused` / `tool_loop.unknown_tool_requested` / `tool_loop.max_iterations_reached` | the loop's own guardrails firing |
-| `WARNING` | `agent.validation_warnings` | the stated decision didn't match what a tool actually returned |
-| `WARNING` | `agent.fallback_resolution_used` | the model never called `submit_resolution` |
+| `WARNING` | `agent.resolution_corrected` | the stated decision was overridden to match what a tool actually returned |
+| `WARNING` | `agent.fallback_resolution_used` | the model never called `submit_resolution`, or the call was structurally invalid |
 | `ERROR` | `agent.api_error` | the Anthropic API call itself failed |
 | `INFO` | `agent.case_resolved` | a case resolved cleanly, no warnings |
 
