@@ -40,10 +40,14 @@ DECISION_VALUES = [
     "CANNOT_RESOLVE",
 ]
 
-# Most-conservative-wins tie-break if more than one hard override ever fires
-# for the same resolution (shouldn't happen -- the conditions in
-# _find_issues are mutually exclusive by construction -- but this keeps the
-# result deterministic if it ever does).
+# Most-conservative-wins tie-break for when more than one hard override
+# fires for the same resolution -- this does happen (e.g. process_refund
+# returning ESCALATION_REQUIRED while the model claims AUTO_REFUND_APPROVED
+# trips both the direct ESCALATION_REQUIRED check and the "status != APPROVED
+# but decision == AUTO_REFUND_APPROVED" check below), the two findings just
+# always agree on the same override_decision for a given tool status, so the
+# tie-break never actually changes the outcome -- it exists to keep the
+# result deterministic rather than to resolve a real disagreement.
 _DECISION_PRIORITY = {
     "CANNOT_RESOLVE": 0,
     "ESCALATION_REQUIRED": 1,
