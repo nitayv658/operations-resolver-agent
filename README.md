@@ -302,6 +302,31 @@ python3 run_ticket.py "My order ORD-1001 arrived damaged." USR-999   # USR-999 d
 python3 run_ticket.py "My order ORD-1001 arrived damaged." USR-101   # USR-101 does -- proceeds normally
 ```
 
+### Triggering a real workflow for cases a human must act on
+
+`submit_resolution` covers *respond* (`customer_response`) and *write* (the
+returned dict, logged via `agent.case_resolved`/`agent.resolution_corrected`)
+-- but until a case actually needs a human, nothing created an artifact one
+could act on. A `customer_response` saying "this has been escalated" was only
+ever a sentence in the reply, with no downstream effect.
+
+`resolver_agent/escalation_workflow.py` closes that: any resolution whose
+final `decision` is `ESCALATION_REQUIRED` or `CANNOT_RESOLVE` (the two
+values that mean "a human still needs to look at this," after every
+guardrail above has already run) gets a structural record appended to an
+ops queue (`escalation_queue.jsonl` by default, override with
+`ResolverAgent(escalation_queue_path=...)` or the `ESCALATION_QUEUE_PATH`
+env var). `AUTO_REFUND_APPROVED`/`REJECTED` are terminal and trigger nothing.
+The record deliberately excludes `customer_response` and the raw ticket text
+-- same privacy stance as `logging_utils.py`, which never logs either for the
+same reason (can contain a customer's name). This runs for every path that
+can produce a final resolution -- the normal flow, the schema-invalid
+fallback, and the API-failure fallback all funnel through
+`ResolverAgent._finalize_workflow()` -- and the result is visible on the
+returned dict as `_workflow_triggered`. A real deployment would swap the
+default JSONL append for an actual ticket-creation API call; `trigger_workflow`
+takes an injectable `writer` for exactly that.
+
 ### Edge cases and guardrails
 
 | Case | How it's handled |

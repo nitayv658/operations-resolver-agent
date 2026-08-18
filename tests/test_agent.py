@@ -247,6 +247,50 @@ def test_resolve_should_include_case_id_in_every_outcome():
     assert isinstance(result["_case_id"], str) and result["_case_id"]
 
 
+def test_resolve_when_decision_is_terminal_should_not_trigger_workflow(tmp_path):
+    client = ScriptedClient([_submit("REJECTED")])
+    queue_path = tmp_path / "queue.jsonl"
+    agent = ResolverAgent(client=client, escalation_queue_path=queue_path)
+
+    result = agent.resolve("Hi, I have a problem.")
+
+    assert result["_workflow_triggered"] is False
+    assert not queue_path.exists()
+
+
+@pytest.mark.parametrize("decision", ["ESCALATION_REQUIRED", "CANNOT_RESOLVE"])
+def test_resolve_when_decision_needs_a_human_should_trigger_workflow_and_log(tmp_path, caplog, decision):
+    client = ScriptedClient([_submit(decision)])
+    queue_path = tmp_path / "queue.jsonl"
+    agent = ResolverAgent(client=client, escalation_queue_path=queue_path)
+
+    with caplog.at_level(logging.INFO, logger="resolver_agent"):
+        result = agent.resolve("Hi, I have a problem.")
+
+    assert result["_workflow_triggered"] is True
+    assert queue_path.exists()
+
+    records = [r for r in caplog.records if r.getMessage() == "agent.workflow_triggered"]
+    assert len(records) == 1
+    assert records[0].fields["decision"] == decision
+    assert records[0].fields["case_id"] == result["_case_id"]
+
+
+def test_resolve_when_api_error_forces_escalation_should_also_trigger_workflow(tmp_path):
+    # The api_error fallback and the normal flow both funnel through
+    # _finalize_workflow -- an infra failure that safely escalates still
+    # needs a real ops-queue record, not just a customer-facing sentence.
+    client = ScriptedClient([fake_bad_request_error("Your credit balance is too low.")])
+    queue_path = tmp_path / "queue.jsonl"
+    agent = ResolverAgent(client=client, escalation_queue_path=queue_path)
+
+    result = agent.resolve("Hi, I have a problem.")
+
+    assert result["action_taken"]["decision"] == "ESCALATION_REQUIRED"
+    assert result["_workflow_triggered"] is True
+    assert queue_path.exists()
+
+
 @pytest.mark.parametrize("bad_value", [0, -1])
 def test_resolver_agent_when_max_iterations_is_not_positive_should_raise_at_construction(bad_value):
     # Fail fast at construction time, not on the first .resolve() call --

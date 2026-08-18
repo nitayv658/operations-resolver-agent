@@ -28,6 +28,19 @@ def tool_registry():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_escalation_queue(tmp_path, monkeypatch):
+    """escalation_workflow's default queue path is a real repo-root file --
+    redirect it to a per-test tmp_path so running the suite never writes to
+    (or races on) the real escalation_queue.jsonl. Patched on the module
+    attribute, not a bound default, since trigger_workflow reads it at call
+    time -- see escalation_workflow.DEFAULT_QUEUE_PATH.
+    """
+    from resolver_agent import escalation_workflow
+
+    monkeypatch.setattr(escalation_workflow, "DEFAULT_QUEUE_PATH", tmp_path / "escalation_queue.jsonl")
+
+
+@pytest.fixture(autouse=True)
 def _reset_resolver_agent_logging():
     """configure_logging() mutates global state on the "resolver_agent"
     logger (handlers, level, and propagate=False so a real application
