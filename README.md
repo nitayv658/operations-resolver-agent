@@ -421,11 +421,3 @@ contain the customer's name. Log fields stay structural: `case_id`,
 `run_ticket.py`/`run_scenarios.py` call `configure_logging()`, once, at
 startup. Embedding the package elsewhere (e.g. Part 2) means calling that
 yourself, or not, without it fighting over the root logger.
-
----
-
-## A note on the fixtures
-
-The brief asks us to flag rather than edit anything that looks off in
-`starter-kit/data/`. Nothing was found that needed flagging — all 33 checks
-in `verify_scenarios.py` pass against the fixtures as provided.
