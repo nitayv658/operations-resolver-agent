@@ -424,13 +424,6 @@ yourself, or not, without it fighting over the root logger.
 
 ---
 
-## Demo video
-
-*(optional, ≤2 min — add a link here showing a happy-path run and an
-edge-case run via `run_ticket.py` or `run_scenarios.py`)*
-
----
-
 ## A note on the fixtures
 
 The brief asks us to flag rather than edit anything that looks off in
