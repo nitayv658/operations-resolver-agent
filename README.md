@@ -7,6 +7,13 @@ reject / escalate), and returns structured, auditable output.
 
 > 🇮🇱 גרסה עברית: [`README.he.md`](README.he.md) — same content, same structure.
 
+> 📓 [`demo.ipynb`](demo.ipynb) — a runnable walkthrough against the live
+> API and real starter-kit tools (happy path, authority breach, hallucination
+> trap, cross-customer authorization, the full 10-ticket regression suite,
+> and the under-request-to-dodge-escalation guardrail), with real, saved
+> outputs. This README is the design writeup; the notebook is the solution
+> actually running.
+
 The tool box and fixture data live in [`starter-kit/`](starter-kit/) and are
 **unmodified**, exactly as provided — see [`starter-kit/README.md`](starter-kit/README.md)
 for the tools themselves. Everything in this top-level README is the agent

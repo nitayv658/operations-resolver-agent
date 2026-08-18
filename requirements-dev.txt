@@ -1,3 +1,8 @@
 # Dev/test-only dependencies. Not needed to run the agent itself.
 -r requirements.txt
 pytest>=8.0
+
+# Only needed to re-run demo.ipynb (Jupyter is not needed to run the agent
+# or the test suite).
+jupyter>=1.0
+pandas>=2.0
