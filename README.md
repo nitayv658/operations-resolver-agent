@@ -488,10 +488,14 @@ LOG_LEVEL=INFO python3 run_ticket.py "..."   2> >(jq .)   # pretty-print the log
 |---|---|---|
 | `DEBUG` | `tool_loop.tool_executed` | every real GlobalCart tool call |
 | `WARNING` | `tool_loop.repeat_call_refused` / `tool_loop.unknown_tool_requested` / `tool_loop.max_iterations_reached` | the loop's own guardrails firing |
+| `WARNING` | `agent.unauthorized_tool_result_denied` | a tool result naming a different owner than `requester_user_id` was denied |
 | `WARNING` | `agent.resolution_corrected` | the stated decision was overridden to match what a tool actually returned |
+| `WARNING` | `agent.validation_warnings` | defensive-only; should be unreachable since `enforce_resolution` corrects every condition it detects |
 | `WARNING` | `agent.fallback_resolution_used` | the model never called `submit_resolution`, or the call was structurally invalid |
+| `WARNING` | `escalation_workflow.webhook_delivery_failed` | an `ESCALATION_WEBHOOK_URL` delivery failed or was refused (non-HTTPS); fell back to the local file |
 | `ERROR` | `agent.api_error` | the Anthropic API call itself failed |
 | `INFO` | `agent.case_resolved` | a case resolved cleanly, no warnings |
+| `INFO` | `agent.workflow_triggered` | an ops-queue record was written for `ESCALATION_REQUIRED`/`CANNOT_RESOLVE` |
 
 Never logged: the raw ticket text or the `customer_response` body — both can
 contain the customer's name. Log fields stay structural: `case_id`,
@@ -501,3 +505,27 @@ contain the customer's name. Log fields stay structural: `case_id`,
 `run_ticket.py`/`run_scenarios.py` call `configure_logging()`, once, at
 startup. Embedding the package elsewhere (e.g. Part 2) means calling that
 yourself, or not, without it fighting over the root logger.
+
+### Summarizing logs: `summarize_logs.py`
+
+These events already carry the right categorical signal, but until now
+nothing aggregated them — that was issue #6. `summarize_logs.py` is a local,
+dependency-free first step (not a substitute for shipping logs to a real
+platform and alerting there): it parses resolver_agent's JSON log lines and
+reports counts per event, plus counts of *distinct cases* that hit each one,
+with a "degradation signals" section highlighting the events worth watching
+for a rising rate (`agent.api_error`, `agent.fallback_resolution_used`,
+`agent.resolution_corrected`, `agent.unauthorized_tool_result_denied`,
+`escalation_workflow.webhook_delivery_failed`, `tool_loop.max_iterations_reached`).
+
+Non-JSON lines are silently skipped, so it's safe to pipe combined
+stdout+stderr straight in:
+
+```bash
+LOG_LEVEL=INFO python3 run_scenarios.py 2>&1 | python3 summarize_logs.py
+python3 run_ticket.py "..." 2> run.log && python3 summarize_logs.py run.log
+```
+
+`agent.case_resolved`/`agent.workflow_triggered` are `INFO`-level, so set
+`LOG_LEVEL=INFO` when generating the log you want a full summary of --
+the default `WARNING` level only captures the degradation signals themselves.
