@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -95,12 +96,57 @@ def _append_jsonl(record: Dict[str, Any], path: Path) -> None:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+# Excluded from the payload that actually leaves the process via the
+# webhook -- unlike the local queue file (an internal artifact within the
+# same trust boundary as this module's own stderr-log privacy stance),
+# ESCALATION_WEBHOOK_URL points at an arbitrary, operator-configured third
+# party. reasoning_chain is freeform LLM text (prompts.py rule 6 only asks
+# for "real facts," which is not a PII-safety guarantee), so nothing
+# structurally prevents it from including a customer's name or complaint
+# detail. Found during a security review: the stated "only structural
+# facts" privacy intent was never actually enforced for this field.
+_WEBHOOK_EXCLUDED_FIELDS = frozenset({"reasoning_chain"})
+
+
+def _webhook_payload(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in record.items() if k not in _WEBHOOK_EXCLUDED_FIELDS}
+
+
+def _redact_url(url: str) -> str:
+    """scheme://netloc/path only -- no query string, no fragment.
+
+    Webhook auth is commonly a signed token in the query string
+    (``?token=...``), so the full URL must never reach a log line or an
+    exception message that itself gets logged (see
+    ``escalation_workflow.webhook_delivery_failed`` in :func:`build_webhook_writer`).
+    Used for *display* only -- the real ``url`` (with its query string
+    intact) is still what's actually requested in :func:`post_webhook`.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
 def post_webhook(record: Dict[str, Any], url: str, *, timeout: float = DEFAULT_WEBHOOK_TIMEOUT_SECONDS) -> None:
     """POST ``record`` as JSON to ``url``. Raises :class:`WebhookDeliveryError`
-    on any network error, timeout, or non-2xx response -- ``urlopen`` itself
-    already raises ``HTTPError`` (a subclass of ``URLError``) for a non-2xx
-    status, so a single except clause covers both.
+    on any network error, timeout, non-2xx response, or a non-HTTPS/malformed
+    URL -- ``urlopen`` itself already raises ``HTTPError`` (a subclass of
+    ``URLError``) for a non-2xx status, so a single except clause covers both.
+
+    The scheme is checked *before* any network attempt (or even constructing
+    the ``Request``, which raises a raw ``ValueError`` of its own for a
+    malformed URL) -- an escalation record must never be attempted in
+    cleartext, not merely warned about after the fact. Error messages use
+    :func:`_redact_url` -- never the real ``url`` -- since any query string
+    (e.g. a webhook auth token) must not end up in an exception message a
+    caller might log.
     """
+    scheme = urllib.parse.urlsplit(url).scheme
+    if scheme != "https":
+        raise WebhookDeliveryError(
+            f"refusing to POST to {_redact_url(url)!r}: escalation records "
+            f"must only be sent over https, got scheme {scheme!r}."
+        )
+
     data = json.dumps(record, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         url, data=data, headers={"Content-Type": "application/json"}, method="POST"
@@ -109,28 +155,29 @@ def post_webhook(record: Dict[str, Any], url: str, *, timeout: float = DEFAULT_W
         with _urlopen(request, timeout=timeout):
             pass
     except (urllib.error.URLError, OSError) as exc:
-        raise WebhookDeliveryError(f"POST {url} failed: {exc}") from exc
+        raise WebhookDeliveryError(f"POST {_redact_url(url)} failed: {exc}") from exc
 
 
 def build_webhook_writer(
     url: str, *, timeout: float = DEFAULT_WEBHOOK_TIMEOUT_SECONDS
 ) -> Callable[[Dict[str, Any], Path], None]:
-    """A writer that POSTs the record to ``url``, falling back to the local
-    JSONL append (the same ``path`` :func:`trigger_workflow` would have used
-    anyway) if delivery fails. A failed webhook is an infra hiccup, not a
-    reason to lose the record or crash the case's resolve() call -- see
-    :class:`WebhookDeliveryError`.
+    """A writer that POSTs the record to ``url`` (minus ``reasoning_chain``,
+    see :data:`_WEBHOOK_EXCLUDED_FIELDS`), falling back to a local JSONL
+    append of the *full* record (the same ``path`` :func:`trigger_workflow`
+    would have used anyway) if delivery fails or the URL isn't HTTPS. A
+    failed/refused webhook is not a reason to lose the record or crash the
+    case's resolve() call -- see :class:`WebhookDeliveryError`.
     """
 
     def _write(record: Dict[str, Any], path: Path) -> None:
         try:
-            post_webhook(record, url, timeout=timeout)
+            post_webhook(_webhook_payload(record), url, timeout=timeout)
         except WebhookDeliveryError as exc:
             log_event(
                 _logger,
                 logging.WARNING,
                 "escalation_workflow.webhook_delivery_failed",
-                url=url,
+                url=_redact_url(url),
                 error=str(exc),
                 case_id=record.get("case_id"),
             )

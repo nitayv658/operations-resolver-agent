@@ -215,3 +215,103 @@ def test_trigger_workflow_when_webhook_url_is_unset_should_use_the_local_file(tm
     trigger_workflow(_resolution("ESCALATION_REQUIRED"), "case123", queue_path=path)
 
     assert path.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Security review findings: (1) no scheme/TLS enforcement on the webhook URL
+# -- an http:// endpoint would ship escalation records in cleartext with no
+# warning; (2) reasoning_chain is freeform LLM text, never actually filtered
+# for PII despite the module's stated "only structural facts" privacy intent
+# -- shipping it to an arbitrary third-party webhook is a real information
+# disclosure gap the local-file-only design never had. Both found during a
+# senior-cyber-architect threat model review, not previously covered.
+# --------------------------------------------------------------------------- #
+
+
+def test_post_webhook_when_url_is_not_https_should_refuse_without_attempting_delivery(monkeypatch):
+    calls = []
+    monkeypatch.setattr(escalation_workflow, "_urlopen", lambda request, timeout: calls.append(1))
+
+    with pytest.raises(WebhookDeliveryError, match="https"):
+        post_webhook({"case_id": "abc123"}, "http://ops.example.com/hook")
+
+    # must refuse before ever attempting the network call -- cleartext must
+    # never be attempted, not merely warned about after the fact
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad_url", ["http://ops.example.com/hook", "ftp://ops.example.com/hook", "not-a-url"])
+def test_build_webhook_writer_when_url_is_not_https_should_fall_back_to_local_file(tmp_path, monkeypatch, bad_url):
+    # _urlopen is monkeypatched to fail the test if it's ever called -- the
+    # scheme check must reject these before any network attempt, not rely
+    # on the real network call happening to fail.
+    def fail_if_called(request, timeout):
+        raise AssertionError("must not attempt delivery for a non-HTTPS/malformed URL")
+
+    monkeypatch.setattr(escalation_workflow, "_urlopen", fail_if_called)
+    writer = build_webhook_writer(bad_url)
+    path = tmp_path / "fallback.jsonl"
+
+    writer({"case_id": "abc123"}, path)
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert json.loads(lines[0]) == {"case_id": "abc123"}
+
+
+def test_build_webhook_writer_should_exclude_reasoning_chain_from_the_delivered_payload(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _FakeResponse()
+
+    monkeypatch.setattr(escalation_workflow, "_urlopen", fake_urlopen)
+    writer = build_webhook_writer("https://ops.example.com/hook")
+    record = build_escalation_record(_resolution("ESCALATION_REQUIRED"), "case123")
+    assert record["reasoning_chain"]  # sanity: the source record does have it
+
+    writer(record, escalation_workflow.DEFAULT_QUEUE_PATH)
+
+    assert "reasoning_chain" not in captured["body"]
+    # everything else (the actually structural fields) still makes it through
+    assert captured["body"]["case_id"] == "case123"
+    assert captured["body"]["decision"] == "ESCALATION_REQUIRED"
+
+
+def test_build_webhook_writer_when_delivery_fails_should_fall_back_with_the_full_record(tmp_path, monkeypatch):
+    # The local file is an internal artifact, same trust boundary as this
+    # module's own local-file default -- unlike the webhook egress, it
+    # keeps reasoning_chain, since nothing here leaves the process.
+    def fake_urlopen(request, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(escalation_workflow, "_urlopen", fake_urlopen)
+    writer = build_webhook_writer("https://ops.example.com/hook")
+    path = tmp_path / "fallback.jsonl"
+    record = build_escalation_record(_resolution("ESCALATION_REQUIRED"), "case123")
+
+    writer(record, path)
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    written = json.loads(lines[0])
+    assert written["reasoning_chain"] == record["reasoning_chain"]
+
+
+def test_build_webhook_writer_when_delivery_fails_should_never_log_the_url_query_string(tmp_path, monkeypatch, caplog):
+    # Webhook auth is commonly a signed token in the query string
+    # (?token=...). A delivery failure must not write that token to logs --
+    # only scheme/host/path, never query or fragment.
+    def fake_urlopen(request, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(escalation_workflow, "_urlopen", fake_urlopen)
+    secret_url = "https://ops.example.com/hook?token=super-secret-value"
+    writer = build_webhook_writer(secret_url)
+    path = tmp_path / "fallback.jsonl"
+
+    with caplog.at_level(logging.WARNING, logger="resolver_agent"):
+        writer({"case_id": "abc123"}, path)
+
+    for record in caplog.records:
+        text = record.getMessage() + json.dumps(getattr(record, "fields", {}))
+        assert "super-secret-value" not in text

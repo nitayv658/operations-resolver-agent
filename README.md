@@ -275,6 +275,17 @@ against this:
    lives in code, not in a prompt" principle that `process_refund`'s own
    refund cap uses, applied one layer further out.
 
+**`REJECTED` had no equivalent check.** A security review found this
+three-layer guard was asymmetric: `AUTO_REFUND_APPROVED` is rigorously
+cross-checked against `process_refund`'s real result, but a ticket that
+talked the model into declaring `REJECTED` off invented/hallucinated policy
+reasoning — without `check_return_policy` ever returning `eligible: False`,
+or `process_refund` itself returning `REJECTED` — passed through with zero
+warnings. `_find_issues()` now requires tool-level corroboration for
+`REJECTED` the same way it already required it for approvals; an unbacked
+`REJECTED` is escalated instead, same as any other decision/response-gap
+violation.
+
 ### Requester identity and cross-customer authorization
 
 By default `resolve(ticket_text)` will look up whatever `order_id`/`user_id`
@@ -352,6 +363,24 @@ same local JSONL append the file-only default would have used. For a caller
 that wants to wire in a real ticketing SDK directly instead of the generic
 webhook path, `ResolverAgent(escalation_writer=...)` overrides the writer
 entirely.
+
+**Webhook egress hardening**, added after a security review of this feature:
+
+- **HTTPS only.** `post_webhook()` refuses any URL whose scheme isn't
+  `https` *before* attempting delivery (or even constructing the request) --
+  an escalation record must never be attempted in cleartext. A refused URL
+  falls back to the local file exactly like a network failure would.
+- **`reasoning_chain` never leaves the process.** It's freeform LLM text
+  (nothing about `prompts.py`'s reasoning-chain instructions guarantees it's
+  PII-safe), so it's excluded from the webhook payload specifically --
+  unlike the local queue file, a webhook target is an arbitrary,
+  operator-configured third party. The full record (including
+  `reasoning_chain`) is still what lands in the local fallback file if
+  delivery fails, since that stays within the process's own trust boundary.
+- **The URL itself is never logged with its query string.** Webhook auth is
+  commonly a signed token in the query string (`?token=...`) -- a delivery
+  failure logs and reports only `scheme://host/path`, never the full URL, so
+  a credential embedded in the webhook URL can't end up in `stderr` output.
 
 ### Edge cases and guardrails
 
