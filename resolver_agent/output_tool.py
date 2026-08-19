@@ -193,6 +193,11 @@ def _find_issues(resolution: Dict[str, Any], tool_calls: List[ToolCallRecord]) -
         if isinstance(c.result, dict) and "error" in c.result and c.name != SUBMIT_RESOLUTION_TOOL_NAME
     ]
 
+    check_calls = [
+        c for c in tool_calls if c.name == "check_return_policy" and isinstance(c.result, dict)
+    ]
+    last_check = check_calls[-1].result if check_calls else None
+
     if last_refund is not None:
         status = last_refund.get("status")
 
@@ -293,6 +298,28 @@ def _find_issues(resolution: Dict[str, Any], tool_calls: List[ToolCallRecord]) -
                 override_refund_id=None,
             )
         )
+
+    if last_refund is None and decision == "REJECTED":
+        # AUTO_REFUND_APPROVED is rigorously cross-checked against
+        # process_refund above; REJECTED had no equivalent check at all --
+        # a ticket that talks the model into declaring REJECTED off
+        # invented/hallucinated policy reasoning, without ever getting
+        # eligible=False back from check_return_policy (or REJECTED from
+        # process_refund itself, already covered when last_refund is not
+        # None), passed through unverified. Escalate rather than trust an
+        # unbacked denial -- conservative, not a guess at the real answer.
+        check_says_ineligible = last_check is not None and last_check.get("eligible") is False
+        if not check_says_ineligible:
+            findings.append(
+                _Finding(
+                    "decision is REJECTED but no tool evidence supports it -- "
+                    "check_return_policy was never called with an ineligible "
+                    "result, and process_refund was never called either.",
+                    override_decision="ESCALATION_REQUIRED",
+                    override_refund_amount=None,
+                    override_refund_id=None,
+                )
+            )
 
     if (
         error_calls

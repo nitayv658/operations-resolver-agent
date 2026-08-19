@@ -248,14 +248,45 @@ def test_resolve_should_include_case_id_in_every_outcome():
 
 
 def test_resolve_when_decision_is_terminal_should_not_trigger_workflow(tmp_path):
+    # REJECTED here is backed by a real check_return_policy call (ORD-1003 is
+    # genuinely outside the return window) -- a properly corroborated
+    # terminal decision, not the unbacked-REJECTED case the no-corroboration
+    # guardrail in output_tool.py now separately catches and escalates.
+    client = ScriptedClient(
+        [
+            ScriptedResponse(
+                [tool_use_block("check_return_policy", {"order_id": "ORD-1003", "reason": "changed_mind"})]
+            ),
+            _submit("REJECTED"),
+        ]
+    )
+    queue_path = tmp_path / "queue.jsonl"
+    agent = ResolverAgent(client=client, escalation_queue_path=queue_path)
+
+    result = agent.resolve("Hi, I have a problem.")
+
+    assert result["action_taken"]["decision"] == "REJECTED"
+    assert result["_workflow_triggered"] is False
+    assert not queue_path.exists()
+
+
+def test_resolve_when_rejected_with_no_corroborating_tool_call_should_escalate_and_trigger_workflow(tmp_path):
+    # The exact scenario the new output_tool.py guardrail exists for: a
+    # REJECTED claim with zero backing tool evidence must not reach the
+    # customer as-is -- it gets corrected to ESCALATION_REQUIRED, same as
+    # any other decision/response-gap violation, and that now-escalated
+    # case correctly triggers the ops workflow.
     client = ScriptedClient([_submit("REJECTED")])
     queue_path = tmp_path / "queue.jsonl"
     agent = ResolverAgent(client=client, escalation_queue_path=queue_path)
 
     result = agent.resolve("Hi, I have a problem.")
 
-    assert result["_workflow_triggered"] is False
-    assert not queue_path.exists()
+    assert result["action_taken"]["decision"] == "ESCALATION_REQUIRED"
+    assert any("no tool evidence" in w for w in result["_validation_warnings"])
+    assert result["_corrections"]
+    assert result["_workflow_triggered"] is True
+    assert queue_path.exists()
 
 
 @pytest.mark.parametrize("decision", ["ESCALATION_REQUIRED", "CANNOT_RESOLVE"])
