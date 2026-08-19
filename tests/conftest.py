@@ -38,6 +38,10 @@ def _isolate_escalation_queue(tmp_path, monkeypatch):
     from resolver_agent import escalation_workflow
 
     monkeypatch.setattr(escalation_workflow, "DEFAULT_QUEUE_PATH", tmp_path / "escalation_queue.jsonl")
+    # A real ESCALATION_WEBHOOK_URL in the developer's shell must not make
+    # the suite attempt real network calls -- tests that want the webhook
+    # path opt in explicitly via monkeypatch.setenv.
+    monkeypatch.delenv("ESCALATION_WEBHOOK_URL", raising=False)
 
 
 @pytest.fixture(autouse=True)
