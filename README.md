@@ -302,6 +302,22 @@ python3 run_ticket.py "My order ORD-1001 arrived damaged." USR-999   # USR-999 d
 python3 run_ticket.py "My order ORD-1001 arrived damaged." USR-101   # USR-101 does -- proceeds normally
 ```
 
+**What this doesn't close:** `requester_user_id` is still just a string the
+caller supplies — this package never verifies the caller actually *is* that
+identity. That has to happen upstream (a session token, SSO, whatever this
+agent sits behind); it's genuinely outside what code inside `resolver_agent/`
+can do, since there's no identity provider here to check against.
+
+What *is* closable in code is the failure mode where a customer-facing
+deployment accidentally runs unrestricted because some call site forgot to
+pass `requester_user_id` — that's what `ResolverAgent(client=...,
+require_verified_requester=True)` guards against: `resolve()` then raises
+immediately (before ever calling the model) if `requester_user_id` is
+omitted, rather than silently degrading to "any record is fair game." It's a
+fail-closed switch, not authentication — the default (`False`) preserves
+today's unrestricted-when-omitted behavior exactly, appropriate for an
+internal ops-console context.
+
 ### Triggering a real workflow for cases a human must act on
 
 `submit_resolution` covers *respond* (`customer_response`) and *write* (the
