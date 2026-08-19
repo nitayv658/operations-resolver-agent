@@ -115,6 +115,7 @@ class ResolverAgent:
         model: str = DEFAULT_MODEL,
         max_iterations: int = 8,
         escalation_queue_path: Optional[Path] = None,
+        escalation_writer: Optional[Callable[[Dict[str, Any], Path], None]] = None,
         require_verified_requester: bool = False,
     ) -> None:
         if max_iterations < 1:
@@ -133,6 +134,12 @@ class ResolverAgent:
         # explicit override here is mainly for tests and alternate deployments
         # that want the ops queue written somewhere other than the repo root.
         self.escalation_queue_path = escalation_queue_path
+        # None means "use escalation_workflow's own default resolution"
+        # (webhook if ESCALATION_WEBHOOK_URL is set, else the local file).
+        # An explicit override here is for a caller that wants to wire in a
+        # real ticketing system's SDK directly, bypassing the generic
+        # webhook path entirely.
+        self.escalation_writer = escalation_writer
         # A deployment posture, not a per-call choice: a customer-facing
         # deployment should never be able to silently fall back to
         # unrestricted mode just because a caller forgot to pass
@@ -319,7 +326,9 @@ class ResolverAgent:
         escalation_workflow.trigger_workflow for the record shape and the
         (deliberately minimal) write mechanics.
         """
-        record = trigger_workflow(resolution, case_id, queue_path=self.escalation_queue_path)
+        record = trigger_workflow(
+            resolution, case_id, queue_path=self.escalation_queue_path, writer=self.escalation_writer
+        )
         resolution["_workflow_triggered"] = record is not None
         if record is not None:
             log_event(

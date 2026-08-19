@@ -8,10 +8,19 @@ built resolution dict.
 from __future__ import annotations
 
 import json
+import logging
+import urllib.error
 
 import pytest
 
-from resolver_agent.escalation_workflow import build_escalation_record, trigger_workflow
+from resolver_agent import escalation_workflow
+from resolver_agent.escalation_workflow import (
+    WebhookDeliveryError,
+    build_escalation_record,
+    build_webhook_writer,
+    post_webhook,
+    trigger_workflow,
+)
 
 
 def _resolution(decision, **overrides):
@@ -102,3 +111,107 @@ def test_trigger_workflow_should_use_injected_writer_instead_of_touching_disk(tm
     assert result is not None
     assert written == [(result, tmp_path / "unused.jsonl")]
     assert not (tmp_path / "unused.jsonl").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Webhook delivery -- _urlopen is monkeypatched so these never touch the real
+# network. post_webhook/build_webhook_writer are tested directly; the
+# ESCALATION_WEBHOOK_URL env-var wiring is tested at the trigger_workflow
+# level below.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def test_post_webhook_when_delivery_succeeds_should_post_the_record_as_json(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["method"] = request.get_method()
+        captured["content_type"] = request.get_header("Content-type")
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return _FakeResponse()
+
+    monkeypatch.setattr(escalation_workflow, "_urlopen", fake_urlopen)
+
+    post_webhook({"case_id": "abc123", "decision": "ESCALATION_REQUIRED"}, "https://ops.example.com/hook")
+
+    assert captured["url"] == "https://ops.example.com/hook"
+    assert captured["method"] == "POST"
+    assert captured["content_type"] == "application/json"
+    assert captured["body"] == {"case_id": "abc123", "decision": "ESCALATION_REQUIRED"}
+
+
+def test_post_webhook_when_delivery_fails_should_raise_webhook_delivery_error(monkeypatch):
+    def fake_urlopen(request, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(escalation_workflow, "_urlopen", fake_urlopen)
+
+    with pytest.raises(WebhookDeliveryError, match="connection refused"):
+        post_webhook({"case_id": "abc123"}, "https://ops.example.com/hook")
+
+
+def test_webhook_writer_when_delivery_succeeds_should_not_touch_the_fallback_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(escalation_workflow, "_urlopen", lambda request, timeout: _FakeResponse())
+    writer = build_webhook_writer("https://ops.example.com/hook")
+    path = tmp_path / "fallback.jsonl"
+
+    writer({"case_id": "abc123"}, path)
+
+    assert not path.exists()
+
+
+def test_webhook_writer_when_delivery_fails_should_fall_back_to_the_local_file_and_log(tmp_path, monkeypatch, caplog):
+    def fake_urlopen(request, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(escalation_workflow, "_urlopen", fake_urlopen)
+    writer = build_webhook_writer("https://ops.example.com/hook")
+    path = tmp_path / "fallback.jsonl"
+
+    with caplog.at_level(logging.WARNING, logger="resolver_agent"):
+        writer({"case_id": "abc123"}, path)
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert json.loads(lines[0]) == {"case_id": "abc123"}
+
+    records = [r for r in caplog.records if r.getMessage() == "escalation_workflow.webhook_delivery_failed"]
+    assert len(records) == 1
+    assert records[0].fields["case_id"] == "abc123"
+
+
+def test_trigger_workflow_when_webhook_url_env_var_is_set_should_use_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("ESCALATION_WEBHOOK_URL", "https://ops.example.com/hook")
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        return _FakeResponse()
+
+    monkeypatch.setattr(escalation_workflow, "_urlopen", fake_urlopen)
+    path = tmp_path / "unused.jsonl"
+
+    record = trigger_workflow(_resolution("ESCALATION_REQUIRED"), "case123", queue_path=path)
+
+    assert record is not None
+    assert captured["url"] == "https://ops.example.com/hook"
+    assert not path.exists()  # delivered successfully -- no fallback needed
+
+
+def test_trigger_workflow_when_webhook_url_is_unset_should_use_the_local_file(tmp_path):
+    # The conftest autouse fixture already deletes ESCALATION_WEBHOOK_URL --
+    # this just makes the default explicit and pins the regression.
+    path = tmp_path / "queue.jsonl"
+
+    trigger_workflow(_resolution("ESCALATION_REQUIRED"), "case123", queue_path=path)
+
+    assert path.exists()
