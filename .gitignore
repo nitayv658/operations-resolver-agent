@@ -15,3 +15,4 @@ Quest 4_files/
 # Runtime ops-queue artifact written by escalation_workflow.trigger_workflow
 # (ESCALATION_REQUIRED / CANNOT_RESOLVE records) -- not source, never committed.
 escalation_queue.jsonl
+demo_escalation_queue.jsonl
