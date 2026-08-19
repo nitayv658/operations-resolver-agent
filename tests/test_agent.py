@@ -276,6 +276,26 @@ def test_resolve_when_decision_needs_a_human_should_trigger_workflow_and_log(tmp
     assert records[0].fields["case_id"] == result["_case_id"]
 
 
+def test_resolve_when_escalation_writer_is_overridden_should_use_it_instead_of_the_default(tmp_path):
+    # A caller wiring in a real ticketing SDK bypasses the generic webhook
+    # path entirely via escalation_writer -- confirm ResolverAgent actually
+    # threads it through to trigger_workflow rather than ignoring it.
+    client = ScriptedClient([_submit("ESCALATION_REQUIRED")])
+    written = []
+    agent = ResolverAgent(
+        client=client,
+        escalation_queue_path=tmp_path / "unused.jsonl",
+        escalation_writer=lambda record, path: written.append(record),
+    )
+
+    result = agent.resolve("Hi, I have a problem.")
+
+    assert result["_workflow_triggered"] is True
+    assert len(written) == 1
+    assert written[0]["case_id"] == result["_case_id"]
+    assert not (tmp_path / "unused.jsonl").exists()
+
+
 def test_resolve_when_api_error_forces_escalation_should_also_trigger_workflow(tmp_path):
     # The api_error fallback and the normal flow both funnel through
     # _finalize_workflow -- an infra failure that safely escalates still

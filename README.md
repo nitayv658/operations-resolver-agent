@@ -323,9 +323,19 @@ same reason (can contain a customer's name). This runs for every path that
 can produce a final resolution -- the normal flow, the schema-invalid
 fallback, and the API-failure fallback all funnel through
 `ResolverAgent._finalize_workflow()` -- and the result is visible on the
-returned dict as `_workflow_triggered`. A real deployment would swap the
-default JSONL append for an actual ticket-creation API call; `trigger_workflow`
-takes an injectable `writer` for exactly that.
+returned dict as `_workflow_triggered`.
+
+**Delivery beyond the local file:** set `ESCALATION_WEBHOOK_URL` and the
+record is POSTed as JSON to that URL instead -- deliberately vendor-agnostic
+rather than tied to one ticketing SDK, since Zendesk triggers, PagerDuty's
+Events API, Opsgenie, Slack incoming webhooks, and a bespoke internal
+endpoint are all "accepts a JSON POST." A failed delivery (network error,
+timeout, non-2xx) never loses the record -- `build_webhook_writer()` catches
+it, logs `escalation_workflow.webhook_delivery_failed`, and falls back to the
+same local JSONL append the file-only default would have used. For a caller
+that wants to wire in a real ticketing SDK directly instead of the generic
+webhook path, `ResolverAgent(escalation_writer=...)` overrides the writer
+entirely.
 
 ### Edge cases and guardrails
 
