@@ -428,3 +428,48 @@ def test_resolve_when_requester_user_id_omitted_should_stay_unrestricted():
 
     order_call = next(c for c in result["_tool_calls"] if c["name"] == "get_order_details")
     assert "error" not in order_call["result"]
+
+
+# --------------------------------------------------------------------------- #
+# require_verified_requester -- a deployment-level fail-closed switch, not a
+# real authentication mechanism (this package still never verifies
+# requester_user_id is true -- see the docstring on resolve()). It only
+# guards against a customer-facing deployment silently falling back to
+# unrestricted mode because some call site forgot to pass an identity.
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_when_require_verified_requester_and_no_requester_id_should_raise_immediately():
+    agent = ResolverAgent(client=ScriptedClient([]), require_verified_requester=True)
+
+    with pytest.raises(ValueError, match="require_verified_requester"):
+        agent.resolve("Hi, I have a problem.")
+
+    # fails before ever calling the model
+    assert agent.client.calls == 0
+
+
+def test_resolve_when_require_verified_requester_and_requester_id_given_should_proceed_normally():
+    client = ScriptedClient(
+        [
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+            _submit("ESCALATION_REQUIRED"),
+        ]
+    )
+    agent = ResolverAgent(client=client, require_verified_requester=True)
+
+    result = agent.resolve("My order ORD-1001 arrived damaged.", requester_user_id="USR-101")
+
+    order_call = next(c for c in result["_tool_calls"] if c["name"] == "get_order_details")
+    assert "error" not in order_call["result"]
+
+
+def test_resolve_when_require_verified_requester_is_false_should_keep_unrestricted_default():
+    # Regression: the default (False) must behave exactly as before this
+    # change -- omitting requester_user_id stays a valid, supported call.
+    client = ScriptedClient([_submit("ESCALATION_REQUIRED")])
+    agent = ResolverAgent(client=client)  # require_verified_requester defaults to False
+
+    result = agent.resolve("Hi, I have a problem.")
+
+    assert result["action_taken"]["decision"] == "ESCALATION_REQUIRED"

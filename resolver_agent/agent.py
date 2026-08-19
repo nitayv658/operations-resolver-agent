@@ -116,6 +116,7 @@ class ResolverAgent:
         max_iterations: int = 8,
         escalation_queue_path: Optional[Path] = None,
         escalation_writer: Optional[Callable[[Dict[str, Any], Path], None]] = None,
+        require_verified_requester: bool = False,
     ) -> None:
         if max_iterations < 1:
             raise ValueError(f"max_iterations must be at least 1, got {max_iterations!r}.")
@@ -139,18 +140,30 @@ class ResolverAgent:
         # real ticketing system's SDK directly, bypassing the generic
         # webhook path entirely.
         self.escalation_writer = escalation_writer
+        # A deployment posture, not a per-call choice: a customer-facing
+        # deployment should never be able to silently fall back to
+        # unrestricted mode just because a caller forgot to pass
+        # requester_user_id on one call site. False (the default) preserves
+        # today's behavior exactly -- appropriate for an internal
+        # ops-console context where any record is fair game.
+        self.require_verified_requester = require_verified_requester
 
     def resolve(self, ticket_text: str, requester_user_id: Optional[str] = None) -> Dict[str, Any]:
         """Resolve one support ticket end to end.
 
         ``requester_user_id`` is the authenticated identity of whoever
         submitted this ticket -- this package has no authentication of its
-        own (out of scope, an upstream concern), but if the caller supplies
+        own (out of scope, an upstream concern: verifying that the caller
+        actually *is* this identity, e.g. via a session token or SSO, has
+        to happen upstream before this is called). If the caller supplies
         one, any tool result naming a *different* owning customer is denied
         (NOT_AUTHORIZED) before it ever reaches the model, rather than
-        merely flagged afterward. Omitting it (the default) reproduces
-        today's unrestricted behavior exactly -- e.g. an internal
-        ops-console context where any record is fair game.
+        merely flagged afterward. Omitting it reproduces today's
+        unrestricted behavior exactly -- e.g. an internal ops-console
+        context where any record is fair game -- unless this agent was
+        constructed with ``require_verified_requester=True``, in which case
+        omitting it raises immediately instead of silently degrading to
+        unrestricted (see below).
 
         Returns the submit_resolution arguments (reasoning_chain,
         action_taken, customer_response) plus bookkeeping fields:
@@ -178,7 +191,25 @@ class ResolverAgent:
         distinguished by tool_loop.py from the SDK's own exhausted retries --
         is caught here and turned into a safe escalation. Any other
         exception is a real bug and is left to propagate, not swallowed.
+
+        Raises:
+            ValueError: if this agent was constructed with
+                ``require_verified_requester=True`` and ``requester_user_id``
+                was not supplied. A misconfigured customer-facing deployment
+                should fail loudly and immediately, not silently process a
+                ticket in unrestricted mode.
         """
+        if self.require_verified_requester and requester_user_id is None:
+            raise ValueError(
+                "This ResolverAgent requires a verified requester_user_id "
+                "(require_verified_requester=True) but resolve() was called "
+                "without one -- refusing to run in unrestricted mode. Pass "
+                "requester_user_id after verifying the caller's identity "
+                "upstream, or construct with "
+                "require_verified_requester=False for an internal "
+                "ops-console context where any record is fair game."
+            )
+
         case_id = uuid.uuid4().hex[:8]
         ctx = {"case_id": case_id}
         messages: List[Dict[str, Any]] = [{"role": "user", "content": ticket_text}]
