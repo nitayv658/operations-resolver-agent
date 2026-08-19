@@ -11,3 +11,7 @@ venv/
 # docs/quest-brief/ (the actual source markdown from the quest's repo).
 Quest 4.html
 Quest 4_files/
+
+# Runtime ops-queue artifact written by escalation_workflow.trigger_workflow
+# (ESCALATION_REQUIRED / CANNOT_RESOLVE records) -- not source, never committed.
+escalation_queue.jsonl

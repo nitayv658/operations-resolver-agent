@@ -26,6 +26,7 @@ if str(STARTER_KIT_DIR) not in sys.path:
 
 import mock_services as gc  # noqa: E402  (path must be set up first)
 
+from .escalation_workflow import trigger_workflow  # noqa: E402
 from .logging_utils import get_logger, log_event  # noqa: E402
 from .output_tool import (  # noqa: E402
     SUBMIT_RESOLUTION_SCHEMA,
@@ -113,6 +114,7 @@ class ResolverAgent:
         client: Optional[anthropic.Anthropic] = None,
         model: str = DEFAULT_MODEL,
         max_iterations: int = 8,
+        escalation_queue_path: Optional[Path] = None,
     ) -> None:
         if max_iterations < 1:
             raise ValueError(f"max_iterations must be at least 1, got {max_iterations!r}.")
@@ -126,6 +128,10 @@ class ResolverAgent:
         self.max_iterations = max_iterations
         self.tool_schemas = list(gc.TOOL_SCHEMAS) + [SUBMIT_RESOLUTION_SCHEMA]
         self.tool_registry = dict(gc.TOOL_REGISTRY)
+        # None means "use escalation_workflow.DEFAULT_QUEUE_PATH" -- an
+        # explicit override here is mainly for tests and alternate deployments
+        # that want the ops queue written somewhere other than the repo root.
+        self.escalation_queue_path = escalation_queue_path
 
     def resolve(self, ticket_text: str, requester_user_id: Optional[str] = None) -> Dict[str, Any]:
         """Resolve one support ticket end to end.
@@ -146,8 +152,10 @@ class ResolverAgent:
         ``_validation_warnings`` (any mismatch between the stated decision
         and what the tools actually returned), ``_corrections`` (what was
         deterministically overridden to fix a mismatch, if anything -- see
-        output_tool.enforce_resolution) and ``_stopped_reason`` (``"stop"``,
-        ``"max_iterations"`` or ``"api_error"``).
+        output_tool.enforce_resolution), ``_stopped_reason`` (``"stop"``,
+        ``"max_iterations"`` or ``"api_error"``), and ``_workflow_triggered``
+        (whether an ops-queue record was written for ESCALATION_REQUIRED /
+        CANNOT_RESOLVE -- see escalation_workflow.trigger_workflow).
 
         A resolution that is structurally invalid (missing required fields,
         or a ``decision`` outside the four allowed values -- see
@@ -201,7 +209,7 @@ class ResolverAgent:
             resolution["_validation_warnings"] = []
             resolution["_corrections"] = []
             resolution["_stopped_reason"] = "api_error"
-            return resolution
+            return self._finalize_workflow(resolution, case_id, ctx)
 
         raw_resolution = self._extract_resolution(result.tool_calls)
         schema_errors = validate_schema(raw_resolution) if raw_resolution is not None else None
@@ -265,6 +273,31 @@ class ResolverAgent:
                 **ctx,
             )
 
+        return self._finalize_workflow(resolution, case_id, ctx)
+
+    def _finalize_workflow(
+        self, resolution: Dict[str, Any], case_id: str, ctx: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Stage-9 "trigger workflow": write an ops-queue record for any case
+        a human still has to act on (ESCALATION_REQUIRED, CANNOT_RESOLVE).
+
+        Every path that can produce a final resolution -- the normal flow,
+        the schema-fallback, and the API-failure fallback -- funnels through
+        here, so a human always gets a real record to act on rather than
+        only a customer-facing sentence claiming one exists. See
+        escalation_workflow.trigger_workflow for the record shape and the
+        (deliberately minimal) write mechanics.
+        """
+        record = trigger_workflow(resolution, case_id, queue_path=self.escalation_queue_path)
+        resolution["_workflow_triggered"] = record is not None
+        if record is not None:
+            log_event(
+                _logger,
+                logging.INFO,
+                "agent.workflow_triggered",
+                decision=record["decision"],
+                **ctx,
+            )
         return resolution
 
     @staticmethod
