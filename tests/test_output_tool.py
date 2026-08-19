@@ -28,6 +28,14 @@ def _refund_call(order_id: str, amount: float) -> ToolCallRecord:
     )
 
 
+def _check_call(order_id: str, reason: str = "damaged_on_arrival") -> ToolCallRecord:
+    return ToolCallRecord(
+        "check_return_policy",
+        {"order_id": order_id, "reason": reason},
+        gc.check_return_policy(order_id, reason),
+    )
+
+
 def test_validate_resolution_when_decision_matches_approval_should_return_no_warnings():
     # ORD-1001: VIP, $35, damaged -- real flow approves in full.
     order_call = _order_call("ORD-1001")
@@ -186,6 +194,56 @@ def test_validate_resolution_when_tool_error_but_decision_claims_approved_should
     }
     warnings = validate_resolution(resolution, [error_call])
     assert any("a tool returned an error" in w for w in warnings)
+
+
+# --------------------------------------------------------------------------- #
+# REJECTED with no corroborating tool result. Unlike AUTO_REFUND_APPROVED
+# (rigorously cross-checked against process_refund above), REJECTED had no
+# equivalent check at all -- a ticket that talks the model into declaring
+# REJECTED off invented/hallucinated policy reasoning, without ever calling
+# check_return_policy or getting REJECTED back from process_refund, passed
+# through with zero warnings. Found during a security review of the
+# decision/response-gap guardrail's actual coverage (Tampering / wrongful
+# denial via prompt injection, not caught by any existing layer).
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_resolution_when_rejected_with_no_corroborating_tool_result_should_warn():
+    # Only a lookup was made -- no check_return_policy, no process_refund.
+    # Nothing backs a REJECTED claim here except the model's own say-so.
+    order_call = _order_call("ORD-1001")
+    resolution = {"action_taken": {"decision": "REJECTED", "refund_amount": None, "refund_id": None}}
+
+    warnings = validate_resolution(resolution, [order_call])
+
+    assert any("no tool evidence" in w for w in warnings)
+
+
+def test_validate_resolution_when_rejected_and_check_return_policy_says_ineligible_should_not_warn():
+    # ORD-1003 is genuinely outside the return window -- REJECTED here is
+    # real tool ground truth, not an unverified claim, so this must NOT warn.
+    check_call = _check_call("ORD-1003")
+    assert check_call.result["eligible"] is False
+
+    resolution = {"action_taken": {"decision": "REJECTED", "refund_amount": None, "refund_id": None}}
+
+    assert validate_resolution(resolution, [check_call]) == []
+
+
+def test_validate_resolution_when_process_refund_was_called_and_returned_rejected_should_not_warn():
+    # When process_refund WAS called, the pre-existing check above (matching
+    # status against decision) already fully covers REJECTED -- the new
+    # no-corroboration check only applies when process_refund was never
+    # called at all (last_refund is None). Confirms the new check doesn't
+    # double-warn or otherwise interfere with the already-covered path.
+    # ORD-1001's real total is $35 -- requesting $999 makes process_refund
+    # reject independently of check_return_policy's own eligibility.
+    refund_call = _refund_call("ORD-1001", 999.0)
+    assert refund_call.result["status"] == "REJECTED"
+
+    resolution = {"action_taken": {"decision": "REJECTED", "refund_amount": None, "refund_id": None}}
+
+    assert validate_resolution(resolution, [refund_call]) == []
 
 
 # --------------------------------------------------------------------------- #
