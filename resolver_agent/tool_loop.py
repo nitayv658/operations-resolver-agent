@@ -65,7 +65,18 @@ class ModelAPIError(RuntimeError):
 
 
 def _signature(name: str, tool_input: Dict[str, Any]) -> tuple:
-    return (name, tuple(sorted(tool_input.items())))
+    """A hashable, order-independent fingerprint of one tool call.
+
+    ``tuple(sorted(tool_input.items()))`` (the original implementation) broke
+    as soon as any argument value was itself unhashable -- e.g. a dict, which
+    Part 2's ``send_slack_alert(payload: dict, ...)`` genuinely needs. JSON
+    serialization handles arbitrarily nested dict/list arguments while still
+    treating two calls with the same name and same argument values (in any
+    key order) as the same signature -- ``sort_keys=True`` makes the string
+    itself order-independent, same guarantee ``tuple(sorted(...))`` gave for
+    the flat case.
+    """
+    return (name, json.dumps(tool_input, sort_keys=True, default=str))
 
 
 def _stringify(result: Any) -> str:
