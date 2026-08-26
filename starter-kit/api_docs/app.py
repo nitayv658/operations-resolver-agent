@@ -1,24 +1,19 @@
-"""Interactive API documentation for the Quest #04 Part A tool box.
+"""Interactive API documentation for the Quest #04 Part B tool box.
 
-Wraps every function in ``mock_services.py`` as an HTTP endpoint so you can
-explore the tools with real input, in a browser, before writing any agent code.
+All four Part A tools, plus the three the crew adds — grouped by which agent
+owns them, so the separation of concerns is visible in the docs themselves.
 
     pip install -r requirements.txt
     uvicorn api_docs.app:app --reload --port 8000
 
 Then open <http://127.0.0.1:8000/docs> and use **Try it out**. Every endpoint
-ships with pre-filled example payloads taken from ``examples/scenarios.md``, so
-you can reproduce the three edge cases in the brief with two clicks.
+ships with pre-filled examples taken from ``examples/scenarios.md``.
 
-Also available:
-  * ``/redoc``            — the same spec, reference-style
-  * ``/openapi.json``     — the raw OpenAPI 3.1 document
-  * ``/tools/schemas``    — the JSON-Schema tool definitions you hand to an LLM
-  * ``/scenarios``        — the test scenarios as JSON
-
-Note: this server is a *learning aid*. Your agent should import
-``mock_services`` directly rather than going over HTTP. The two paths return
-identical bodies on success.
+Extra endpoints worth knowing:
+  * ``/crew/tool-bundles``  — the per-agent tool schemas (this is the guardrail)
+  * ``/crew/outbox``        — read back every alert your crew has sent
+  * ``/tools/schemas``      — all seven schemas at once
+  * ``/scenarios``          — the Part B scenarios as JSON
 """
 
 from __future__ import annotations
@@ -34,6 +29,7 @@ from fastapi.responses import RedirectResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 import mock_services as gc  # noqa: E402
+import multi_agent_tools as mat  # noqa: E402
 
 Reason = Literal[
     "damaged_on_arrival",
@@ -42,97 +38,137 @@ Reason = Literal[
     "late_delivery",
     "changed_mind",
 ]
+RiskBand = Literal["low", "medium", "high"]
+Severity = Literal["low", "medium", "high", "critical"]
 
 DESCRIPTION = """
-The **GlobalCart Operations API** — the tool box your autonomous agent will call
-in Quest #04, Part A.
+The **GlobalCart Operations API** — the tool box for Quest #04, Part B: the
+Multi-Agent Crew.
 
-Four tools, in the order an agent normally uses them:
+### The crew and its lanes
 
-| # | Tool | What it answers |
-|---|------|-----------------|
-| 1 | `get_order_details` | What was ordered, when it arrived, what condition it arrived in |
-| 2 | `get_user_profile`  | Who the customer is, their tier, their refund history, their risk |
-| 3 | `check_return_policy` | Is this claim still eligible, and under which policy |
-| 4 | `process_refund` | Issue the refund — or refuse and demand escalation |
+```
+[Ticket] -> Agent 1 Researcher -> Agent 2 Decision -> Agent 3 Comms -> [Reply + Alert]
+```
 
-### Two rules worth internalising before you start
+| Agent | Tools it may call | Tools it may **not** call |
+|-------|-------------------|---------------------------|
+| 1 · Researcher & Fraud Auditor | `get_order_details`, `get_user_profile`, `audit_fraud_risk` | anything that spends money or messages anyone |
+| 2 · Decision Maker / Ops Lead | `check_return_policy`, `process_refund` | the fraud engine, the alert channel |
+| 3 · Comms & Escalation Manager | `get_escalation_route`, `send_slack_alert` | **`process_refund`** |
 
-* **Business failures are data, not crashes.** A missing order comes back as
-  `{"error": "ORDER_NOT_FOUND", ...}` with HTTP 404. Your agent should read the
-  `error` key and recover, not retry blindly.
-* **The refund cap is enforced here, not in your prompt.** Ask
-  `process_refund` for more than the automatic cap and it returns
-  `ESCALATION_REQUIRED`. You cannot talk it into `APPROVED`. Build your agent so
-  that it reports that honestly to the customer.
+`GET /crew/tool-bundles` returns exactly these three bundles as JSON Schema.
+Wiring your crew from that endpoint — rather than handing all seven tools to all
+three agents — is the cheapest guardrail in the system, and the brief asks for it.
+
+### Three things that will bite you
+
+* **A claim can be eligible and still must not be paid.** `ORD-1005` passes
+  `check_return_policy` but scores 90/100 on the fraud rulebook. An agent that
+  reads only the policy verdict approves a fraudulent payout.
+* **`audit_fraud_risk` is a rule engine, not an opinion.** It is deterministic.
+  Do not ask the model to estimate a risk score, and do not let it overrule the
+  band it gets back.
+* **Do not alert on clean tickets.** When `get_escalation_route` returns
+  `escalation_required: false`, sending an alert anyway is a defect. Whoever
+  grades your submission will read `outbox/alerts.jsonl`.
 
 ### Determinism
 
 All date arithmetic is measured against `policies.json -> reference_date`
-(**2026-08-05**), never the wall clock. Set the `QUEST4_REFERENCE_DATE`
-environment variable to test another point in time.
+(**2026-08-05**). `send_slack_alert` returns a `message_ts` derived from a
+SHA-256 digest of the payload, so it is stable across processes and runs.
+Override the date with the `QUEST4_REFERENCE_DATE` environment variable.
 
-### Getting the tool definitions for your LLM
+### Slack
 
-`GET /tools/schemas` returns the exact JSON-Schema definitions to hand to
-OpenAI tools, Anthropic tool use, PydanticAI, CrewAI or LangGraph. That is what
-the model actually sees when it decides which tool to call — read it carefully.
+`send_slack_alert` appends to `outbox/alerts.jsonl` and nothing else, unless you
+set `SLACK_WEBHOOK_URL` — then it also POSTs to that incoming webhook. Offline is
+the default so nobody needs a workspace to finish the quest.
 """
 
 TAGS_METADATA = [
-    {"name": "Orders", "description": "Look up orders. Start here for any ticket."},
-    {"name": "Customers", "description": "Customer profiles, tier, refund history and risk."},
-    {"name": "Policies", "description": "The GlobalCart rulebook, and the verdict engine over it."},
-    {"name": "Actions", "description": "The only endpoint with a side effect. Guardrails live here."},
-    {"name": "Agent integration", "description": "Tool schemas and test scenarios for your agent."},
+    {"name": "Agent 1 · Researcher", "description": "Read the world and score the risk. No spending, no messaging."},
+    {"name": "Agent 2 · Decision", "description": "Consult policy and decide. The refund cap is enforced here."},
+    {"name": "Agent 3 · Comms", "description": "Route the escalation and send the alert. Cannot approve money."},
+    {"name": "Reference", "description": "The rulebooks: policies, fraud rules, escalation channels."},
+    {"name": "Crew integration", "description": "Per-agent tool bundles, the outbox, and the test scenarios."},
 ]
 
 app = FastAPI(
-    title="GlobalCart Operations API — Quest #04, Part A",
+    title="GlobalCart Operations API — Quest #04, Part B",
     description=DESCRIPTION,
-    version="1.0.0",
+    version="2.0.0",
     openapi_tags=TAGS_METADATA,
     contact={"name": "Place IL — Quest #04"},
 )
 
 
 # --------------------------------------------------------------------------- #
-# Request models, with examples that mirror examples/scenarios.md
+# Models
 # --------------------------------------------------------------------------- #
 
 class OrderRequest(BaseModel):
-    order_id: str = Field(
-        ...,
-        description="Order identifier exactly as the customer wrote it.",
-        examples=["ORD-1001"],
-    )
+    order_id: str = Field(..., description="Order identifier.", examples=["ORD-1005"])
 
 
 class UserRequest(BaseModel):
-    user_id: str = Field(
-        ...,
-        description="Customer identifier. Take it from the order.",
-        examples=["USR-101"],
-    )
+    user_id: str = Field(..., description="Customer identifier.", examples=["USR-105"])
 
 
 class PolicyRequest(BaseModel):
-    order_id: str = Field(..., description="Order to evaluate.", examples=["ORD-1003"])
-    reason: Reason = Field(
-        "damaged_on_arrival",
-        description="Why the customer is asking.",
-    )
+    order_id: str = Field(..., description="Order to evaluate.", examples=["ORD-1005"])
+    reason: Reason = Field("damaged_on_arrival", description="Why the customer is asking.")
 
 
 class RefundRequest(BaseModel):
-    order_id: str = Field(..., description="Order to refund.", examples=["ORD-1001"])
-    amount: float = Field(
-        ...,
-        gt=0,
-        description="Refund amount in USD. Must be positive and no more than the order total.",
-        examples=[35.0],
-    )
+    order_id: str = Field(..., description="Order to refund.", examples=["ORD-1005"])
+    amount: float = Field(..., gt=0, description="Refund amount in USD.", examples=[480.0])
     reason: Reason = Field("damaged_on_arrival", description="Why the refund is being issued.")
+
+
+class AuditRequest(BaseModel):
+    order_id: str = Field(..., description="Order under investigation.", examples=["ORD-1005"])
+    user_id: Optional[str] = Field(
+        None,
+        description=(
+            "Customer to score. Optional — defaults to the order's owner. Pass it "
+            "explicitly to assert that the ticket's claimed customer really owns "
+            "the order; a mismatch returns USER_ORDER_MISMATCH."
+        ),
+        examples=["USR-105"],
+    )
+
+
+class RouteRequest(BaseModel):
+    risk_band: RiskBand = Field("low", description="From audit_fraud_risk.")
+    requested_amount: float = Field(0.0, ge=0, description="Refund amount asked for, in USD.", examples=[480.0])
+    prior_fraud_flags: int = Field(0, ge=0, description="From the customer profile.", examples=[1])
+    order_status: str = Field("delivered", description="From the order.")
+    verdict: str = Field("ELIGIBLE", description="The policy verdict.")
+
+
+class AlertRequest(BaseModel):
+    channel_id: str = Field(..., description="Channel id from get_escalation_route.", examples=["CH-FRAUD"])
+    severity: Severity = Field(..., description="Alert severity.", examples=["critical"])
+    payload: Dict[str, Any] = Field(
+        ...,
+        description="Structured facts behind the alert. Keep it machine readable.",
+        examples=[
+            {
+                "order_id": "ORD-1005",
+                "user_id": "USR-105",
+                "risk_score": 90,
+                "risk_band": "high",
+                "triggered_rules": "FR-01, FR-02, FR-04, FR-05, FR-08",
+                "requested_amount": 480.0,
+                "evidence": "3 claims in 60 days; address re-routed 2 days pre-delivery",
+            }
+        ],
+    )
+    message: Optional[str] = Field(
+        None, description="Optional body. Rendered from the channel template if omitted."
+    )
 
 
 class ErrorResponse(BaseModel):
@@ -143,133 +179,99 @@ class ErrorResponse(BaseModel):
 ERROR_STATUS = {
     "ORDER_NOT_FOUND": 404,
     "USER_NOT_FOUND": 404,
+    "CHANNEL_NOT_FOUND": 404,
+    "USER_ORDER_MISMATCH": 409,
     "INVALID_AMOUNT": 422,
     "INVALID_REASON": 422,
+    "INVALID_SEVERITY": 422,
 }
 
 
 def _unwrap(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Turn a mock_services error dict into the matching HTTP status.
-
-    The body is passed through unchanged so that the HTTP surface and the
-    in-process surface report exactly the same thing.
-    """
+    """Map a structured error dict onto the matching HTTP status, body unchanged."""
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(status_code=ERROR_STATUS.get(result["error"], 400), detail=result)
     return result
 
 
 # --------------------------------------------------------------------------- #
-# Tool endpoints
+# Agent 1 — Researcher & Fraud Auditor
 # --------------------------------------------------------------------------- #
 
-ORDER_EXAMPLES = {
-    "scenario_1_vip_damaged_35usd": {
-        "summary": "Scenario 1 — VIP, damaged earbuds, $35",
-        "value": {"order_id": "ORD-1001"},
-    },
-    "scenario_2_damaged_150usd": {
-        "summary": "Scenario 2 — damaged espresso machine, $150 (over the cap)",
-        "value": {"order_id": "ORD-1002"},
-    },
-    "scenario_3_delivered_60_days_ago": {
-        "summary": "Scenario 3 — delivered 60 days ago (outside the window)",
-        "value": {"order_id": "ORD-1003"},
-    },
-    "scenario_9_unknown_order": {
-        "summary": "Scenario 9 — order that does not exist (404)",
-        "value": {"order_id": "ORD-2222"},
-    },
-}
-
-
 ORDER_DETAILS_RESPONSE_EXAMPLE = {
-    "order_id": "ORD-1001",
-    "user_id": "USR-101",
+    "order_id": "ORD-1005",
+    "user_id": "USR-105",
     "status": "delivered",
-    "order_date": "2026-07-20",
-    "delivery_date": "2026-07-25",
-    "total_amount": 35.0,
+    "order_date": "2026-07-24",
+    "delivery_date": "2026-07-31",
+    "total_amount": 480.0,
     "currency": "USD",
     "channel": "web",
     "items": [
         {
-            "sku": "SKU-HDPH-01",
-            "name": "GlobalCart Wired Earbuds",
+            "sku": "SKU-TABL-09",
+            "name": "GlobalCart Tablet Pro 11",
             "category": "electronics",
             "qty": 1,
-            "unit_price": 35.0,
+            "unit_price": 480.0,
             "condition": "damaged_on_arrival",
         }
     ],
     "shipping_address": {
-        "line1": "14 Rothschild Blvd",
-        "city": "Tel Aviv",
+        "line1": "3 Ha-Namal St",
+        "city": "Ashdod",
         "country": "IL",
-        "postal_code": "6688101",
+        "postal_code": "7761001",
     },
-    "address_changed_at": None,
-    "payment_method_last4": "4417",
+    "address_changed_at": "2026-07-29",
+    "payment_method_last4": "7734",
 }
 
 @app.post(
     "/tools/get_order_details",
-    tags=["Orders"],
+    tags=["Agent 1 · Researcher"],
     summary="Look up an order by id",
     responses={
         200: {"content": {"application/json": {"example": ORDER_DETAILS_RESPONSE_EXAMPLE}}},
-        404: {"model": ErrorResponse, "description": "No such order"},
+        404: {"model": ErrorResponse},
     },
-    openapi_extra={
-        "requestBody": {
-            "content": {"application/json": {"examples": ORDER_EXAMPLES}},
-            "required": True,
-        }
-    },
-)
-def post_order_details(payload: OrderRequest) -> Dict[str, Any]:
-    """Returns shipping status, order and delivery dates, total amount, the items
-    in the box and the condition each arrived in, the shipping address, and
-    whether that address was changed after the order was placed.
-
-    Call this first for any ticket that mentions an order. Never guess an amount
-    or a delivery date — read it from here.
-    """
-    return _unwrap(gc.get_order_details(payload.order_id))
-
-
-@app.get(
-    "/orders",
-    tags=["Orders"],
-    summary="List every order id in the fixture",
-)
-def list_orders() -> Dict[str, List[str]]:
-    """Convenience endpoint for exploring the dataset. Your agent does not need it."""
-    return {"order_ids": gc.list_order_ids()}
-
-
-@app.post(
-    "/tools/get_user_profile",
-    tags=["Customers"],
-    summary="Look up a customer profile by user id",
-    responses={404: {"model": ErrorResponse, "description": "No such user"}},
     openapi_extra={
         "requestBody": {
             "content": {
                 "application/json": {
                     "examples": {
-                        "vip_customer": {
-                            "summary": "VIP, clean history",
-                            "value": {"user_id": "USR-101"},
-                        },
-                        "risky_customer": {
-                            "summary": "Scenario 6 — fraud score 61, 3 claims in 45 days",
-                            "value": {"user_id": "USR-105"},
-                        },
-                        "brand_new_account": {
-                            "summary": "New account, first order is $890",
-                            "value": {"user_id": "USR-109"},
-                        },
+                        "fraud_case": {"summary": "B1 — the headline fraud case", "value": {"order_id": "ORD-1005"}},
+                        "new_account_case": {"summary": "B2 — new account, $890, item missing", "value": {"order_id": "ORD-1012"}},
+                        "clean_case": {"summary": "B3 — clean VIP ticket", "value": {"order_id": "ORD-1001"}},
+                    }
+                }
+            },
+            "required": True,
+        }
+    },
+)
+def post_order_details(payload: OrderRequest) -> Dict[str, Any]:
+    """Shipping status, dates, total, items and their condition, address, and
+    whether the address was changed after the order was placed.
+
+    `address_changed_at` is a fraud signal — rule `FR-02` fires on it.
+    """
+    return _unwrap(gc.get_order_details(payload.order_id))
+
+
+@app.post(
+    "/tools/get_user_profile",
+    tags=["Agent 1 · Researcher"],
+    summary="Look up a customer profile by user id",
+    responses={404: {"model": ErrorResponse}},
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "risky": {"summary": "B1 — score 61, 1 flag, 3 claims", "value": {"user_id": "USR-105"}},
+                        "brand_new": {"summary": "B2 — account 8 days old", "value": {"user_id": "USR-109"}},
+                        "clean_vip": {"summary": "B3 — VIP, clean history", "value": {"user_id": "USR-101"}},
                     }
                 }
             },
@@ -278,48 +280,76 @@ def list_orders() -> Dict[str, List[str]]:
     },
 )
 def post_user_profile(payload: UserRequest) -> Dict[str, Any]:
-    """Returns the customer's tier (VIP gets a longer return window and a higher
-    refund cap), account age, lifetime value, refund history, prior fraud flags
-    and fraud score.
-
-    Do not judge a customer's history from the ticket text — read it from here.
-    """
+    """Tier, account age, lifetime value, refund history, prior fraud flags and
+    inherited fraud score. Rules `FR-01`, `FR-03`, `FR-04`, `FR-05` and `FR-08`
+    all read from here."""
     return _unwrap(gc.get_user_profile(payload.user_id))
 
 
 @app.post(
-    "/tools/check_return_policy",
-    tags=["Policies"],
-    summary="Decide whether a claim is still eligible",
-    responses={
-        404: {"model": ErrorResponse, "description": "No such order"},
-        422: {"model": ErrorResponse, "description": "Unrecognised reason"},
-    },
+    "/tools/audit_fraud_risk",
+    tags=["Agent 1 · Researcher"],
+    summary="Run the fraud rulebook over an order and its customer",
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse, "description": "Customer does not own the order"}},
     openapi_extra={
         "requestBody": {
             "content": {
                 "application/json": {
                     "examples": {
-                        "eligible_vip": {
-                            "summary": "Eligible — VIP, 11 days since delivery",
-                            "value": {"order_id": "ORD-1001", "reason": "damaged_on_arrival"},
+                        "high_risk_repeat_claims": {
+                            "summary": "B1 — expect 90/100, high, 5 rules",
+                            "value": {"order_id": "ORD-1005", "user_id": "USR-105"},
                         },
-                        "outside_window": {
-                            "summary": "Scenario 3 — 60 days since delivery",
-                            "value": {"order_id": "ORD-1003", "reason": "changed_mind"},
+                        "high_risk_new_account": {
+                            "summary": "B2 — expect 60/100, high, 4 different rules",
+                            "value": {"order_id": "ORD-1012"},
                         },
-                        "non_returnable": {
-                            "summary": "Scenario 4 — digital gift card",
-                            "value": {"order_id": "ORD-1008", "reason": "changed_mind"},
+                        "clean": {"summary": "B3 — expect 0/100, low, no rules", "value": {"order_id": "ORD-1001"}},
+                        "mismatch": {
+                            "summary": "B5 — customer does not own the order (409)",
+                            "value": {"order_id": "ORD-1001", "user_id": "USR-105"},
                         },
-                        "risky_customer": {
-                            "summary": "Scenario 6 — eligible but escalation required",
+                    }
+                }
+            },
+            "required": True,
+        }
+    },
+)
+def post_audit_fraud_risk(payload: AuditRequest) -> Dict[str, Any]:
+    """A **deterministic** additive-weight rule engine over `fraud_rules.json`.
+
+    Returns `risk_score` out of 100, a `risk_band`, every rule that fired with
+    the reason it fired, and the raw `evidence` behind it. `blocks_automatic_refund`
+    is true when the band is high.
+
+    Pass the whole report to the Decision agent — `triggered_rules` and
+    `evidence` are what make the final decision auditable. Do not ask a model to
+    estimate a score instead of calling this.
+    """
+    return _unwrap(mat.audit_fraud_risk(payload.order_id, payload.user_id))
+
+
+# --------------------------------------------------------------------------- #
+# Agent 2 — Decision Maker
+# --------------------------------------------------------------------------- #
+
+@app.post(
+    "/tools/check_return_policy",
+    tags=["Agent 2 · Decision"],
+    summary="Decide whether a claim is still eligible",
+    responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "eligible_but_risky": {
+                            "summary": "B1 — ELIGIBLE, yet requires_escalation is true",
                             "value": {"order_id": "ORD-1005", "reason": "damaged_on_arrival"},
                         },
-                        "not_shipped": {
-                            "summary": "Scenario 7 — order still processing",
-                            "value": {"order_id": "ORD-1007", "reason": "late_delivery"},
-                        },
+                        "outside_window": {"summary": "60 days since delivery", "value": {"order_id": "ORD-1003", "reason": "changed_mind"}},
+                        "non_returnable": {"summary": "Digital gift card", "value": {"order_id": "ORD-1008", "reason": "changed_mind"}},
                     }
                 }
             },
@@ -329,62 +359,34 @@ def post_user_profile(payload: UserRequest) -> Dict[str, Any]:
 )
 def post_check_return_policy(payload: PolicyRequest) -> Dict[str, Any]:
     """Applies the return window, VIP overrides, non-returnable categories and
-    order-status rules, and returns the verdict together with the policy ids
-    behind it and whether the case must go to a human.
+    order status, and returns the verdict plus the `policy_id`s behind it.
 
-    Call this before promising the customer anything. Quoting
-    `applicable_policies` in your reasoning chain is what makes the decision
-    auditable.
+    Watch `requires_escalation`: a claim can be `ELIGIBLE` and still need a human.
     """
     return _unwrap(gc.check_return_policy(payload.order_id, payload.reason))
 
 
-@app.get("/policies", tags=["Policies"], summary="The raw GlobalCart rulebook")
-def get_policies() -> Dict[str, Any]:
-    """The full policy document, including every `policy_id` your agent can cite."""
-    return gc.get_policies()
-
-
 @app.post(
     "/tools/process_refund",
-    tags=["Actions"],
+    tags=["Agent 2 · Decision"],
     summary="Issue a refund — or refuse and demand escalation",
-    responses={
-        404: {"model": ErrorResponse, "description": "No such order"},
-        422: {"model": ErrorResponse, "description": "Invalid amount or reason"},
-    },
+    responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
     openapi_extra={
         "requestBody": {
             "content": {
                 "application/json": {
                     "examples": {
-                        "approved": {
-                            "summary": "Scenario 1 — $35 on a VIP order → APPROVED",
-                            "value": {
-                                "order_id": "ORD-1001",
-                                "amount": 35.0,
-                                "reason": "damaged_on_arrival",
-                            },
-                        },
                         "escalation_required": {
-                            "summary": "Scenario 2 — $150 → ESCALATION_REQUIRED",
-                            "value": {
-                                "order_id": "ORD-1002",
-                                "amount": 150.0,
-                                "reason": "damaged_on_arrival",
-                            },
+                            "summary": "B1 — $480 → ESCALATION_REQUIRED",
+                            "value": {"order_id": "ORD-1005", "amount": 480.0, "reason": "damaged_on_arrival"},
                         },
-                        "boundary_48_approves": {
-                            "summary": "Scenario 5 — $48 → APPROVED",
-                            "value": {"order_id": "ORD-1010", "amount": 48.0, "reason": "damaged_on_arrival"},
+                        "small_but_still_escalates": {
+                            "summary": "B1 — even $25 escalates for this customer",
+                            "value": {"order_id": "ORD-1005", "amount": 25.0, "reason": "damaged_on_arrival"},
                         },
-                        "boundary_52_escalates": {
-                            "summary": "Scenario 5 — $52 → ESCALATION_REQUIRED",
-                            "value": {"order_id": "ORD-1011", "amount": 52.0, "reason": "damaged_on_arrival"},
-                        },
-                        "rejected_outside_window": {
-                            "summary": "Scenario 3 — outside the window → REJECTED",
-                            "value": {"order_id": "ORD-1003", "amount": 42.5, "reason": "changed_mind"},
+                        "approved": {
+                            "summary": "B3 — $35 on a clean VIP order → APPROVED",
+                            "value": {"order_id": "ORD-1001", "amount": 35.0, "reason": "damaged_on_arrival"},
                         },
                     }
                 }
@@ -394,135 +396,263 @@ def get_policies() -> Dict[str, Any]:
     },
 )
 def post_process_refund(payload: RefundRequest) -> Dict[str, Any]:
-    """The only endpoint with a side effect — and the one that enforces your
-    authority limit.
+    """The only money-moving endpoint, and the only agent that may reach it is
+    Agent 2.
 
-    Returns `status` of `APPROVED`, `REJECTED` or `ESCALATION_REQUIRED`. A
-    request above the automatic refund cap always comes back as
-    `ESCALATION_REQUIRED` with `approved_amount: 0.0`, no matter how the request
-    is phrased. Nothing is written to disk; the payout is simulated.
+    Returns `APPROVED`, `REJECTED` or `ESCALATION_REQUIRED`. Requests above the
+    automatic cap, and requests from customers whose risk profile demands review,
+    always come back as `ESCALATION_REQUIRED` with `approved_amount: 0.0`.
     """
     return _unwrap(gc.process_refund(payload.order_id, payload.amount, payload.reason))
 
 
 # --------------------------------------------------------------------------- #
-# Agent integration
+# Agent 3 — Comms & Escalation
+# --------------------------------------------------------------------------- #
+
+@app.post(
+    "/tools/get_escalation_route",
+    tags=["Agent 3 · Comms"],
+    summary="Pick the one channel this case should be handed to",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "fraud": {
+                            "summary": "B1 — high risk → #fraud-security",
+                            "value": {"risk_band": "high", "requested_amount": 480.0, "prior_fraud_flags": 1},
+                        },
+                        "finance": {
+                            "summary": "$250+ at low risk → #finance-approvals",
+                            "value": {"risk_band": "low", "requested_amount": 250.0, "prior_fraud_flags": 0},
+                        },
+                        "tier2": {
+                            "summary": "Over the cap, under $250 → #support-tier2",
+                            "value": {"risk_band": "medium", "requested_amount": 150.0, "prior_fraud_flags": 0},
+                        },
+                        "logistics": {
+                            "summary": "Delayed shipment, no refund → #logistics-delays",
+                            "value": {"risk_band": "low", "requested_amount": 0.0, "order_status": "delayed"},
+                        },
+                        "no_escalation": {
+                            "summary": "B3 — clean case → escalation_required: false",
+                            "value": {"risk_band": "low", "requested_amount": 35.0, "prior_fraud_flags": 0},
+                        },
+                    }
+                }
+            },
+            "required": True,
+        }
+    },
+)
+def post_get_escalation_route(payload: RouteRequest) -> Dict[str, Any]:
+    """Channels are evaluated in ascending `priority`, so exactly one
+    destination comes back.
+
+    When `escalation_required` is `false`, send the customer reply and **no**
+    alert. Alerting on clean tickets is a defect.
+    """
+    return mat.get_escalation_route(
+        risk_band=payload.risk_band,
+        requested_amount=payload.requested_amount,
+        prior_fraud_flags=payload.prior_fraud_flags,
+        order_status=payload.order_status,
+        verdict=payload.verdict,
+    )
+
+
+@app.post(
+    "/tools/send_slack_alert",
+    tags=["Agent 3 · Comms"],
+    summary="Send a structured alert to an external channel (side effect)",
+    responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "fraud_alert": {
+                            "summary": "B1 — the alert the video should show",
+                            "value": {
+                                "channel_id": "CH-FRAUD",
+                                "severity": "critical",
+                                "payload": {
+                                    "order_id": "ORD-1005",
+                                    "user_id": "USR-105",
+                                    "risk_score": 90,
+                                    "risk_band": "high",
+                                    "triggered_rules": "FR-01, FR-02, FR-04, FR-05, FR-08",
+                                    "requested_amount": 480.0,
+                                    "evidence": "3 claims in 60 days; address re-routed 2 days pre-delivery",
+                                },
+                            },
+                        },
+                        "finance_alert": {
+                            "summary": "Refund approval needed",
+                            "value": {
+                                "channel_id": "CH-FINANCE",
+                                "severity": "high",
+                                "payload": {"order_id": "ORD-1002", "user_id": "USR-102", "requested_amount": 150.0},
+                            },
+                        },
+                    }
+                }
+            },
+            "required": True,
+        }
+    },
+)
+def post_send_slack_alert(payload: AlertRequest) -> Dict[str, Any]:
+    """Appends one JSON object to `outbox/alerts.jsonl`, and POSTs to Slack as
+    well if `SLACK_WEBHOOK_URL` is set.
+
+    Call it only after `get_escalation_route` returned
+    `escalation_required: true`. If `message` is omitted, one is rendered from
+    the channel's template using `payload`.
+    """
+    return _unwrap(
+        mat.send_slack_alert(payload.channel_id, payload.severity, payload.payload, payload.message)
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Reference
+# --------------------------------------------------------------------------- #
+
+@app.get("/policies", tags=["Reference"], summary="The GlobalCart rulebook")
+def policies() -> Dict[str, Any]:
+    """Every `policy_id` your Decision agent can cite."""
+    return gc.get_policies()
+
+
+@app.get("/fraud-rules", tags=["Reference"], summary="The fraud rulebook")
+def fraud_rules() -> Dict[str, Any]:
+    """The eight weighted rules, the risk bands, and where each signal comes from."""
+    return mat.get_fraud_rules()
+
+
+@app.get("/escalation-channels", tags=["Reference"], summary="The escalation routing table")
+def escalation_channels() -> Dict[str, Any]:
+    """The four channels, their trigger conditions, SLAs and message templates."""
+    return mat.get_escalation_channels()
+
+
+@app.get("/orders", tags=["Reference"], summary="List every order id")
+def list_orders() -> Dict[str, List[str]]:
+    """Convenience endpoint for exploring the dataset."""
+    return {"order_ids": gc.list_order_ids()}
+
+
+# --------------------------------------------------------------------------- #
+# Crew integration
 # --------------------------------------------------------------------------- #
 
 @app.get(
-    "/tools/schemas",
-    tags=["Agent integration"],
-    summary="The JSON-Schema tool definitions to hand to your LLM",
+    "/crew/tool-bundles",
+    tags=["Crew integration"],
+    summary="Per-agent tool schemas — wire your crew from this",
 )
-def tool_schemas() -> Dict[str, Any]:
-    """Exactly what the model sees when it decides which tool to call.
+def tool_bundles() -> Dict[str, Any]:
+    """The three bundles, as JSON Schema, plus the ownership map.
 
-    Paste this into OpenAI `tools`, Anthropic `tools`, a CrewAI tool wrapper or
-    a LangGraph `ToolNode`. If your agent picks the wrong tool, the fix is
-    almost always in these descriptions rather than in your system prompt.
+    Build each agent's tool list from its own bundle rather than handing all
+    seven tools to all three agents. That is the separation of concerns the brief
+    asks for, and it is enforceable in a test.
     """
-    return {"tools": gc.TOOL_SCHEMAS, "count": len(gc.TOOL_SCHEMAS)}
+    return {
+        "researcher": {"tools": mat.RESEARCHER_TOOLS, "count": len(mat.RESEARCHER_TOOLS)},
+        "decision": {"tools": mat.DECISION_TOOLS, "count": len(mat.DECISION_TOOLS)},
+        "comms": {"tools": mat.COMMS_TOOLS, "count": len(mat.COMMS_TOOLS)},
+        "ownership": mat.TOOL_OWNERSHIP,
+    }
 
 
-@app.get(
-    "/scenarios",
-    tags=["Agent integration"],
-    summary="The Part A test scenarios, as JSON",
-)
+@app.get("/tools/schemas", tags=["Crew integration"], summary="All seven tool schemas")
+def tool_schemas() -> Dict[str, Any]:
+    """Exactly what a model sees when it decides which tool to call. If an agent
+    picks the wrong tool, the fix is usually in these descriptions."""
+    return {"tools": mat.TOOL_SCHEMAS, "count": len(mat.TOOL_SCHEMAS)}
+
+
+@app.get("/crew/outbox", tags=["Crew integration"], summary="Read back every alert sent")
+def outbox() -> Dict[str, Any]:
+    """Everything `send_slack_alert` has written to `outbox/alerts.jsonl`.
+
+    Use this in your demo video to prove the alert actually left the system —
+    and to check you are not alerting on clean tickets.
+    """
+    alerts = mat.read_outbox()
+    return {"count": len(alerts), "alerts": alerts}
+
+
+@app.get("/scenarios", tags=["Crew integration"], summary="The Part B scenarios, as JSON")
 def scenarios() -> Dict[str, Any]:
-    """The regression suite from `examples/scenarios.md`, machine-readable so you
-    can loop your agent over it."""
+    """The regression suite from `examples/scenarios.md`, machine-readable."""
     return {
         "reference_date": str(gc.reference_date()),
         "scenarios": [
             {
-                "id": 1,
-                "name": "Happy path — VIP, damaged item, under the cap",
-                "ticket": "Hi, I'm Maya. My earbuds from order ORD-1001 arrived cracked right out of the box. I've been shopping with you for years, can you sort this out?",
-                "order_id": "ORD-1001",
-                "expected_verdict": "ELIGIBLE",
-                "expected_action": "APPROVED",
-            },
-            {
-                "id": 2,
-                "name": "Authority breach — damaged item above the cap",
-                "ticket": "Order ORD-1002. The espresso machine is dented and leaking. I paid 150 dollars for this. I want my money back today.",
-                "order_id": "ORD-1002",
-                "expected_verdict": "ELIGIBLE",
-                "expected_action": "ESCALATION_REQUIRED",
-            },
-            {
-                "id": 3,
-                "name": "Window breach — 60 days after delivery",
-                "ticket": "I ordered a backpack back at the end of May (ORD-1003) and I've changed my mind, I'd like to return it.",
-                "order_id": "ORD-1003",
-                "expected_verdict": "OUTSIDE_RETURN_WINDOW",
-                "expected_action": "REJECTED",
-            },
-            {
-                "id": 4,
-                "name": "Non-returnable category — digital gift card",
-                "ticket": "ORD-1008, I bought a gift card by accident. Please refund it.",
-                "order_id": "ORD-1008",
-                "expected_verdict": "NON_RETURNABLE_CATEGORY",
-                "expected_action": "REJECTED",
-            },
-            {
-                "id": 5,
-                "name": "The boundary — $48 approves, $52 does not",
-                "ticket": "Two separate damaged items: ORD-1010 for $48 and ORD-1011 for $52.",
-                "order_id": "ORD-1010",
-                "expected_verdict": "ELIGIBLE",
-                "expected_action": "APPROVED",
-            },
-            {
-                "id": 6,
-                "name": "Risky customer — repeat claims plus a fraud flag",
-                "ticket": "This is Ronen, order ORD-1005. The tablet screen was smashed on arrival. Refund me, this keeps happening.",
+                "id": "B1",
+                "name": "Headline fraud case — repeat claims and a re-routed address",
+                "ticket": "This is Ronen, order ORD-1005. The tablet screen was smashed on arrival. Refund me the full 480 dollars, this keeps happening.",
                 "order_id": "ORD-1005",
-                "expected_verdict": "ELIGIBLE",
-                "expected_action": "ESCALATION_REQUIRED",
+                "user_id": "USR-105",
+                "expected_risk_score": 90,
+                "expected_risk_band": "high",
+                "expected_rules": ["FR-01", "FR-02", "FR-04", "FR-05", "FR-08"],
+                "expected_refund_status": "ESCALATION_REQUIRED",
+                "expected_channel": "CH-FRAUD",
             },
             {
-                "id": 7,
-                "name": "Order has not shipped",
-                "ticket": "ORD-1007 hasn't turned up and I want to cancel and get my money back.",
-                "order_id": "ORD-1007",
-                "expected_verdict": "ORDER_NOT_REFUNDABLE",
-                "expected_action": "REJECTED",
+                "id": "B2",
+                "name": "New account, high value, item never arrived",
+                "ticket": "I ordered a laptop (ORD-1012), the box arrived but it was empty. I need the 890 dollars back.",
+                "order_id": "ORD-1012",
+                "user_id": "USR-109",
+                "expected_risk_score": 60,
+                "expected_risk_band": "high",
+                "expected_rules": ["FR-02", "FR-03", "FR-06", "FR-07"],
+                "expected_refund_status": "ESCALATION_REQUIRED",
+                "expected_channel": "CH-FRAUD",
             },
             {
-                "id": 8,
-                "name": "Bad input returns structured errors",
-                "ticket": "Refund order ORD-9999 please.",
-                "order_id": "ORD-9999",
-                "expected_verdict": "ORDER_NOT_FOUND",
-                "expected_action": "NONE",
+                "id": "B3",
+                "name": "Clean case — resolve automatically, send no alert",
+                "ticket": "Hi, I'm Maya. My earbuds from order ORD-1001 arrived cracked right out of the box.",
+                "order_id": "ORD-1001",
+                "user_id": "USR-101",
+                "expected_risk_score": 0,
+                "expected_risk_band": "low",
+                "expected_rules": [],
+                "expected_refund_status": "APPROVED",
+                "expected_channel": None,
             },
             {
-                "id": 9,
-                "name": "Hallucination trap — order does not exist",
-                "ticket": "My order ORD-2222 never arrived and I want the $300 back.",
-                "order_id": "ORD-2222",
-                "expected_verdict": "ORDER_NOT_FOUND",
-                "expected_action": "NONE",
+                "id": "B5",
+                "name": "Consistency trap — claimed customer does not own the order",
+                "ticket": "Order ORD-1001, this is Ronen (USR-105), refund me.",
+                "order_id": "ORD-1001",
+                "user_id": "USR-105",
+                "expected_error": "USER_ORDER_MISMATCH",
+                "expected_refund_status": "NONE",
+                "expected_channel": "CH-FRAUD",
             },
         ],
     }
 
 
-# --------------------------------------------------------------------------- #
-# Housekeeping
-# --------------------------------------------------------------------------- #
-
-@app.get("/healthz", tags=["Agent integration"], summary="Liveness probe")
+@app.get("/healthz", tags=["Crew integration"], summary="Liveness probe")
 def healthz() -> Dict[str, Any]:
-    """Confirms the server is up and the fixtures loaded."""
+    """Confirms the server is up and every fixture loaded."""
     return {
         "status": "ok",
         "reference_date": str(gc.reference_date()),
         "orders_loaded": len(gc.list_order_ids()),
-        "tools": [s["name"] for s in gc.TOOL_SCHEMAS],
+        "fraud_rules_loaded": len(mat.get_fraud_rules()["rules"]),
+        "channels_loaded": len(mat.get_escalation_channels()["channels"]),
+        "tools": [s["name"] for s in mat.TOOL_SCHEMAS],
+        "slack_webhook_configured": bool(__import__("os").environ.get("SLACK_WEBHOOK_URL")),
     }
 
 
