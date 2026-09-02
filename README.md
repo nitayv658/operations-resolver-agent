@@ -262,3 +262,8 @@ The split matters: the first tests whether the fixtures and rules are
 consistent, the second tests this package's own code paths deterministically,
 and only the third tests whether the model actually reasons its way to the
 right outcome — which is the one that can vary run to run.
+
+**A real `run_scenarios.py` transcript is saved in [`docs/evidence/`](docs/evidence/)** —
+stdout and structured logs from an actual run against the live API, not just
+this README's description of one, so the third tier's claims hold up even
+without your own API key.

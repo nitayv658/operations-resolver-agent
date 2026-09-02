@@ -26,6 +26,7 @@ if str(STARTER_KIT_DIR) not in sys.path:
 
 import mock_services as gc  # noqa: E402  (path must be set up first)
 
+from .authorization import authorize_tool_registry  # noqa: E402
 from .escalation_workflow import trigger_workflow  # noqa: E402
 from .logging_utils import get_logger, log_event  # noqa: E402
 from .output_tool import (  # noqa: E402
@@ -44,64 +45,6 @@ DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 # exponential backoff (default 2). Only override it if the caller asked to.
 _max_retries_env = os.environ.get("ANTHROPIC_MAX_RETRIES")
 DEFAULT_MAX_RETRIES = int(_max_retries_env) if _max_retries_env else None
-
-# Every GlobalCart tool's successful result carries this field naming the
-# owning customer (confirmed by reading mock_services.py: get_order_details,
-# get_user_profile, check_return_policy and process_refund all include it).
-_OWNER_FIELD = "user_id"
-
-
-def _deny_unauthorized() -> Dict[str, Any]:
-    return {
-        "error": "NOT_AUTHORIZED",
-        "message": "This record does not belong to the requesting customer.",
-    }
-
-
-def _authorize_tool_registry(
-    tool_registry: Dict[str, Callable[..., Any]],
-    requester_user_id: str,
-    log_context: Dict[str, Any],
-) -> Dict[str, Callable[..., Any]]:
-    """Wrap every tool so a result belonging to a different customer than
-    ``requester_user_id`` is replaced with a NOT_AUTHORIZED error dict
-    before it ever reaches the model.
-
-    This is a prevention, not a detection -- the substitution happens at
-    the tool-dispatch boundary, so the real data never enters the model's
-    context in the first place, rather than being caught only in the final
-    customer-facing output. The NOT_AUTHORIZED shape matches every other
-    business failure in this codebase (an ``error`` key), so it needs no
-    special handling anywhere else: prompts.py's existing "if a tool result
-    contains an error key" rule and output_tool.py's existing "a tool
-    errored, no refund was processed" enforcement rule both already cover
-    it generically, with zero changes to either file.
-
-    Genuine tool errors (e.g. ORDER_NOT_FOUND) are untouched -- only a
-    successful result naming a *different* owner gets substituted.
-    """
-
-    def _wrap(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
-        def wrapped(**kwargs: Any) -> Any:
-            result = fn(**kwargs)
-            if isinstance(result, dict) and "error" not in result:
-                owner = result.get(_OWNER_FIELD)
-                if owner is not None and owner != requester_user_id:
-                    log_event(
-                        _logger,
-                        logging.WARNING,
-                        "agent.unauthorized_tool_result_denied",
-                        tool=name,
-                        record_owner=owner,
-                        requester_user_id=requester_user_id,
-                        **log_context,
-                    )
-                    return _deny_unauthorized()
-            return result
-
-        return wrapped
-
-    return {name: _wrap(name, fn) for name, fn in tool_registry.items()}
 
 
 class ResolverAgent:
@@ -216,7 +159,7 @@ class ResolverAgent:
 
         tool_registry = self.tool_registry
         if requester_user_id is not None:
-            tool_registry = _authorize_tool_registry(self.tool_registry, requester_user_id, ctx)
+            tool_registry = authorize_tool_registry(self.tool_registry, requester_user_id, ctx)
 
         try:
             result = run_tool_loop(
