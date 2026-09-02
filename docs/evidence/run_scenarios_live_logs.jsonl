@@ -1,0 +1,14 @@
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.case_resolved", "decision": "AUTO_REFUND_APPROVED", "tools_called": 4, "stopped_reason": "stop", "case_id": "1231d584"}
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.case_resolved", "decision": "ESCALATION_REQUIRED", "tools_called": 3, "stopped_reason": "stop", "case_id": "c7601387"}
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.workflow_triggered", "decision": "ESCALATION_REQUIRED", "case_id": "c7601387"}
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.case_resolved", "decision": "REJECTED", "tools_called": 2, "stopped_reason": "stop", "case_id": "b4c78ed4"}
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.case_resolved", "decision": "REJECTED", "tools_called": 2, "stopped_reason": "stop", "case_id": "fc016783"}
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.case_resolved", "decision": "AUTO_REFUND_APPROVED", "tools_called": 4, "stopped_reason": "stop", "case_id": "d42e108d"}
+{"level": "WARNING", "logger": "resolver_agent.agent", "event": "agent.resolution_corrected", "correction_count": 1, "decision": "ESCALATION_REQUIRED", "case_id": "0b8a2469"}
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.workflow_triggered", "decision": "ESCALATION_REQUIRED", "case_id": "0b8a2469"}
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.case_resolved", "decision": "ESCALATION_REQUIRED", "tools_called": 4, "stopped_reason": "stop", "case_id": "ea577ac6"}
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.workflow_triggered", "decision": "ESCALATION_REQUIRED", "case_id": "ea577ac6"}
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.case_resolved", "decision": "REJECTED", "tools_called": 2, "stopped_reason": "stop", "case_id": "6b71f63e"}
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.case_resolved", "decision": "REJECTED", "tools_called": 3, "stopped_reason": "stop", "case_id": "a978037f"}
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.case_resolved", "decision": "CANNOT_RESOLVE", "tools_called": 1, "stopped_reason": "stop", "case_id": "c7bc7a6e"}
+{"level": "INFO", "logger": "resolver_agent.agent", "event": "agent.workflow_triggered", "decision": "CANNOT_RESOLVE", "case_id": "c7bc7a6e"}
