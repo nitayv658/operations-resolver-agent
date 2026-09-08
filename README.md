@@ -265,6 +265,13 @@ right outcome — which is the one that can vary run to run.
 
 ## Part 2 — Distributed Agent Crew
 
+> 📄 [`docs/evidence/`](docs/evidence/) — a real, saved transcript of
+> `run_crew_scenarios.py` against the live API (stdout + structured JSON
+> logs, 6/6 scenarios matched), so the crew's real tool-calling behavior
+> below is backed by an actual run, not just this section's description of
+> one. (There's no `demo.ipynb`-style notebook for the crew yet — this is
+> the Part 2 equivalent for now.)
+
 Part 2 turns the single `ResolverAgent` into a three-agent pipeline —
 **Researcher → Decision → Comms** — each with a narrower job, a narrower
 tool bundle, and its own prompt. `resolver_agent/tool_loop.py` is reused
