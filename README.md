@@ -262,3 +262,111 @@ The split matters: the first tests whether the fixtures and rules are
 consistent, the second tests this package's own code paths deterministically,
 and only the third tests whether the model actually reasons its way to the
 right outcome — which is the one that can vary run to run.
+
+---
+
+## Part 2 — Distributed Agent Crew
+
+Part 2 turns the single `ResolverAgent` into a three-agent pipeline —
+**Researcher → Decision → Comms** — each with a narrower job, a narrower
+tool bundle, and its own prompt. `resolver_agent/tool_loop.py` is reused
+completely unchanged: it never knew about GlobalCart specifically, so the
+same send → tool_use → tool_result → send engine that ran one agent in Part
+1 runs each of these three, just handed a different `tool_schemas` /
+`tool_registry` / prompt each time.
+
+```
+resolver_agent/crew/
+├── schemas.py        RiskReport / Decision / CrewResult -- the handoff contracts
+├── orchestrator.py   OperationsCrew.handle_ticket -- wires Researcher -> Decision -> Comms
+├── researcher/        Agent 1 -- get_order_details, get_user_profile, audit_fraud_risk
+├── decision/           Agent 2 -- check_return_policy, process_refund
+└── comms/               Agent 3 -- get_escalation_route, send_slack_alert
+```
+
+Each of the three agent packages mirrors `resolver_agent/`'s own Part 1
+shape one-to-one — an `agent.py`, an `output_tool.py`
+(`validate_schema` + `enforce_*`), and a `prompts.py` — because the pattern
+that shape encodes (force the handoff as a tool call, then cross-check it
+against the real tool result rather than trust it) is exactly what each
+stage needs too, just with a different bundle of tools and a different
+schema at the end of it.
+
+### Why three agents, not one prompt with more tools
+
+Part 1's `submit_resolution` already showed that a single agent juggling
+four tools and a refund cap works. The Stage 2 brief adds fraud auditing
+and Slack alerting on top of that, and the brief's own central trap —
+`ORD-1005`, a claim `check_return_policy` calls **`ELIGIBLE`** on its own,
+that only `audit_fraud_risk`'s 90/100 high-risk score actually blocks — is
+a fraud signal a policy-only tool has no way to see. One agent could still
+technically hold all seven tools, but splitting by *responsibility* buys
+something a bigger single prompt can't: financial authority and outbound
+messaging become **physically** separated (next section), not just
+separated by an instruction the model could be talked out of.
+
+### Authority separation is physical, not just prompted
+
+Each agent's `self.tool_registry` is built from a fixed tuple of tool
+names, one per role — matching the starter kit's own
+`multi_agent_tools.TOOL_OWNERSHIP` map:
+
+| Agent | Can call | Cannot do |
+|---|---|---|
+| **Researcher** | `get_order_details`, `get_user_profile`, `audit_fraud_risk` | Cannot approve/reject a refund or talk to the customer |
+| **Decision** | `check_return_policy`, `process_refund` | Cannot look anything up itself; cannot talk to the customer |
+| **Comms** | `get_escalation_route`, `send_slack_alert` | Cannot touch money |
+
+`DecisionAgent` is the only one of the three whose `tool_registry` can even
+reach `process_refund` — `ResearcherAgent`'s and `CommsAgent`'s registries
+don't contain it at all, so there's no code path by which either could call
+it even if a prompt injection or a reasoning error told them to. This is
+the same "the guardrail lives in how the registry is built, not in a
+sentence the model reads" principle Part 1's `_authorize_tool_registry`
+guardrail uses, applied to role separation instead of customer
+authorization.
+
+### The handoff contracts carry the full report, not a summary
+
+`schemas.py`'s `Decision` model embeds the entire upstream `RiskReport`,
+not just its `risk_band` string. That's a deliberate choice forced by
+`ORD-1005`: if the Researcher-to-Decision handoff only carried a `"high"`
+label, the Decision agent would have to trust that label instead of being
+able to see *why* — the `risk_score`, the `triggered_rules`, the raw
+`evidence` — which is exactly what it needs to weigh against a policy tool
+that, on this same case, is saying `ELIGIBLE`. Losing that detail at the
+handoff boundary would silently defeat the point of the Researcher's work
+one stage later.
+
+### Guardrails specific to the crew
+
+| Case | How it's handled |
+|---|---|
+| Researcher can't find the order/user, or the user doesn't own the order (`USER_ORDER_MISMATCH`) | `ResearcherAgent.run()` returns `report=None`; `OperationsCrew` stops the pipeline immediately and returns a safe, generic escalation response — it never re-dispatches the Researcher, since a retry loop is the wrong response to missing data |
+| Decision agent never produces a valid `submit_decision` call | Same stop-and-escalate treatment, one stage later, with the `RiskReport` still included in the trace |
+| `send_slack_alert` called without *this same case's* own `get_escalation_route` call having returned `escalation_required: true` | `comms/agent.py`'s `_guarded_registry` denies the call in code with `ALERT_NOT_AUTHORIZED` — built fresh per `run()` call, so one case's routing result can never leak into another case's alert decision |
+| A stage's own model output looks structurally valid but doesn't match what the real tool actually returned | `enforce_risk_report` / `enforce_decision` cross-check and deterministically correct it — the same "guardrail lives in code, not in a prompt" pattern as Part 1's `output_tool.enforce_resolution`, run at every stage instead of once |
+| `CommsAgent`'s own `customer_response` is missing or structurally invalid | Falls back to a safe, generic reply derived from `decision.refund_status` (mirrors Part 1's `_safe_customer_response`) |
+
+### Running it
+
+```
+python3 run_crew.py "This is Ronen, order ORD-1005. The tablet screen ..."
+```
+
+prints the resulting `CrewResult` as JSON (requires `ANTHROPIC_API_KEY`; set
+`SLACK_WEBHOOK_URL` to also POST any alert to a real Slack incoming
+webhook, otherwise it's written to `starter-kit/outbox/alerts.jsonl`).
+`run_crew_scenarios.py` runs the crew against the Stage 2 brief's headline
+scenarios plus a Part 1 regression spot-check, the same role
+`run_scenarios.py` plays for Part 1.
+
+### Testing this design
+
+`tests/crew/` (21 tests) follows the same split Part 1 uses: a scripted
+fake model drives each agent and the orchestrator through the real
+starter-kit tools, so the whole suite — 128 tests total across both parts —
+runs deterministically with no API key. `tests/crew/test_tool_ownership.py`
+specifically asserts each agent's registry only contains the tool names
+`TOOL_OWNERSHIP` assigns it, so the authority-separation guarantee above is
+checked in CI, not just true by construction today.
