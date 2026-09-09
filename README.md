@@ -5,8 +5,6 @@ GlobalCart support tickets: it reads the ticket, calls tools to look up the
 order/customer/policy, decides on an operational outcome (auto-refund /
 reject / escalate), and returns structured, auditable output.
 
-> 🇮🇱 גרסה עברית: [`README.he.md`](README.he.md) — same content, same structure.
-
 > 📓 [`demo.ipynb`](demo.ipynb) — a runnable walkthrough against the live
 > API and real starter-kit tools (happy path, authority breach, hallucination
 > trap, cross-customer authorization, the full 10-ticket regression suite,
@@ -267,6 +265,13 @@ right outcome — which is the one that can vary run to run.
 
 ## Part 2 — Distributed Agent Crew
 
+> 📄 [`docs/evidence/`](docs/evidence/) — a real, saved transcript of
+> `run_crew_scenarios.py` against the live API (stdout + structured JSON
+> logs, 6/6 scenarios matched), so the crew's real tool-calling behavior
+> below is backed by an actual run, not just this section's description of
+> one. (There's no `demo.ipynb`-style notebook for the crew yet — this is
+> the Part 2 equivalent for now.)
+
 Part 2 turns the single `ResolverAgent` into a three-agent pipeline —
 **Researcher → Decision → Comms** — each with a narrower job, a narrower
 tool bundle, and its own prompt. `resolver_agent/tool_loop.py` is reused
@@ -450,10 +455,16 @@ scenarios plus a Part 1 regression spot-check, the same role
 
 ### Testing this design
 
-`tests/crew/` (21 tests) follows the same split Part 1 uses: a scripted
+`tests/crew/` (26 tests) follows the same split Part 1 uses: a scripted
 fake model drives each agent and the orchestrator through the real
-starter-kit tools, so the whole suite — 128 tests total across both parts —
+starter-kit tools, so the whole suite — 136 tests total across both parts —
 runs deterministically with no API key. `tests/crew/test_tool_ownership.py`
 specifically asserts each agent's registry only contains the tool names
 `TOOL_OWNERSHIP` assigns it, so the authority-separation guarantee above is
 checked in CI, not just true by construction today.
+
+**A real `run_crew_scenarios.py` transcript is saved in
+[`docs/evidence/`](docs/evidence/)** — stdout and structured logs from an
+actual run against the live API, not just this README's description of one,
+so the crew's real tool-calling behavior and its corrections (`decision.corrected`
+firing for real on the `P1-2` case) hold up even without your own API key.

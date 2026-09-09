@@ -1,0 +1,26 @@
+{"level": "INFO", "logger": "resolver_agent.crew.researcher.agent", "event": "researcher.report_produced", "risk_band": "high", "risk_score": 90, "case_id": "dcd57439", "agent_role": "researcher"}
+{"level": "INFO", "logger": "resolver_agent.crew.decision.agent", "event": "decision.decision_produced", "refund_status": "ESCALATION_REQUIRED", "case_id": "dcd57439", "agent_role": "decision"}
+{"level": "INFO", "logger": "resolver_agent.crew.comms.agent", "event": "comms.result_produced", "alert_sent": true, "case_id": "dcd57439", "agent_role": "comms"}
+{"level": "INFO", "logger": "resolver_agent.crew.orchestrator", "event": "crew.case_resolved", "refund_status": "ESCALATION_REQUIRED", "alert_sent": true, "stopped_reason": "stop", "case_id": "dcd57439"}
+{"level": "INFO", "logger": "resolver_agent.crew.researcher.agent", "event": "researcher.report_produced", "risk_band": "high", "risk_score": 60, "case_id": "a72dee64", "agent_role": "researcher"}
+{"level": "INFO", "logger": "resolver_agent.crew.decision.agent", "event": "decision.decision_produced", "refund_status": "ESCALATION_REQUIRED", "case_id": "a72dee64", "agent_role": "decision"}
+{"level": "INFO", "logger": "resolver_agent.crew.comms.agent", "event": "comms.result_produced", "alert_sent": true, "case_id": "a72dee64", "agent_role": "comms"}
+{"level": "INFO", "logger": "resolver_agent.crew.orchestrator", "event": "crew.case_resolved", "refund_status": "ESCALATION_REQUIRED", "alert_sent": true, "stopped_reason": "stop", "case_id": "a72dee64"}
+{"level": "INFO", "logger": "resolver_agent.crew.researcher.agent", "event": "researcher.report_produced", "risk_band": "low", "risk_score": 0, "case_id": "74bc7111", "agent_role": "researcher"}
+{"level": "INFO", "logger": "resolver_agent.crew.decision.agent", "event": "decision.decision_produced", "refund_status": "APPROVED", "case_id": "74bc7111", "agent_role": "decision"}
+{"level": "INFO", "logger": "resolver_agent.crew.comms.agent", "event": "comms.result_produced", "alert_sent": false, "case_id": "74bc7111", "agent_role": "comms"}
+{"level": "INFO", "logger": "resolver_agent.crew.orchestrator", "event": "crew.case_resolved", "refund_status": "APPROVED", "alert_sent": false, "stopped_reason": "stop", "case_id": "74bc7111"}
+{"level": "INFO", "logger": "resolver_agent.crew.researcher.agent", "event": "researcher.report_produced", "risk_band": "low", "risk_score": 0, "case_id": "a12c111c", "agent_role": "researcher"}
+{"level": "WARNING", "logger": "resolver_agent.crew.decision.agent", "event": "decision.corrected", "correction_count": 2, "case_id": "a12c111c", "agent_role": "decision"}
+{"level": "INFO", "logger": "resolver_agent.crew.decision.agent", "event": "decision.decision_produced", "refund_status": "ESCALATION_REQUIRED", "case_id": "a12c111c", "agent_role": "decision"}
+{"level": "INFO", "logger": "resolver_agent.crew.comms.agent", "event": "comms.result_produced", "alert_sent": true, "case_id": "a12c111c", "agent_role": "comms"}
+{"level": "INFO", "logger": "resolver_agent.crew.orchestrator", "event": "crew.case_resolved", "refund_status": "ESCALATION_REQUIRED", "alert_sent": true, "stopped_reason": "stop", "case_id": "a12c111c"}
+{"level": "INFO", "logger": "resolver_agent.crew.researcher.agent", "event": "researcher.report_produced", "risk_band": "low", "risk_score": 0, "case_id": "bf4d9655", "agent_role": "researcher"}
+{"level": "INFO", "logger": "resolver_agent.crew.decision.agent", "event": "decision.decision_produced", "refund_status": "REJECTED", "case_id": "bf4d9655", "agent_role": "decision"}
+{"level": "INFO", "logger": "resolver_agent.crew.comms.agent", "event": "comms.result_produced", "alert_sent": true, "case_id": "bf4d9655", "agent_role": "comms"}
+{"level": "INFO", "logger": "resolver_agent.crew.orchestrator", "event": "crew.case_resolved", "refund_status": "REJECTED", "alert_sent": true, "stopped_reason": "stop", "case_id": "bf4d9655"}
+{"level": "WARNING", "logger": "resolver_agent.crew.researcher.agent", "event": "researcher.report_corrected", "correction_count": 1, "case_id": "fdf23778", "agent_role": "researcher"}
+{"level": "INFO", "logger": "resolver_agent.crew.researcher.agent", "event": "researcher.report_produced", "risk_band": "low", "risk_score": 0, "case_id": "fdf23778", "agent_role": "researcher"}
+{"level": "INFO", "logger": "resolver_agent.crew.decision.agent", "event": "decision.decision_produced", "refund_status": "REJECTED", "case_id": "fdf23778", "agent_role": "decision"}
+{"level": "INFO", "logger": "resolver_agent.crew.comms.agent", "event": "comms.result_produced", "alert_sent": true, "case_id": "fdf23778", "agent_role": "comms"}
+{"level": "INFO", "logger": "resolver_agent.crew.orchestrator", "event": "crew.case_resolved", "refund_status": "REJECTED", "alert_sent": true, "stopped_reason": "stop", "case_id": "fdf23778"}
