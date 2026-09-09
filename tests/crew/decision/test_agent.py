@@ -129,7 +129,128 @@ def test_run_overrides_an_under_request_that_dodges_escalation():
     # under-requested $50 (at the cap, nothing to escalate) instead of the
     # real $150, and silently send no alert despite the override above.
     assert result.decision.requested_amount == 150.0
-    assert any("under-request" in w for w in result.warnings)
+    assert any("cap leaking into requested_amount" in w for w in result.warnings)
+
+
+def test_run_corrects_a_self_reported_requested_amount_that_leaked_the_cap():
+    # Observed live on ORD-1012: blocks_automatic_refund=true correctly
+    # meant process_refund was never called at all -- but the model
+    # self-reported requested_amount as the $50 auto-refund cap it had just
+    # seen from check_return_policy, instead of the risk report's real $890
+    # order total. Unlike test_run_overrides_an_under_request_that_dodges_
+    # escalation above, there's no process_refund call to cross-check
+    # requested_amount against here -- one of three live-observed shapes
+    # this same leak takes; see the other two below.
+    risk_report = _risk_report(
+        order_id="ORD-1012",
+        user_id="USR-109",
+        risk_score=60,
+        risk_band="high",
+        blocks_automatic_refund=True,
+        requires_security_channel=True,
+        evidence={"order_total_usd": 890.0, "order_status": "delivered", "prior_fraud_flags": 0},
+    )
+    client = ScriptedClient(
+        [
+            ScriptedResponse([tool_use_block("check_return_policy", {"order_id": "ORD-1012"})]),
+            _submit(
+                order_id="ORD-1012",
+                user_id="USR-109",
+                requested_amount=50.0,  # the cap -- wrong, the real claim is $890
+                approved_amount=None,
+                refund_id=None,
+                refund_status="ESCALATION_REQUIRED",  # already correct on its own
+            ),
+        ]
+    )
+    agent = DecisionAgent(client=client, model="x")
+
+    result = agent.run(risk_report, case_id="c5")
+
+    assert result.decision.refund_status == "ESCALATION_REQUIRED"
+    assert result.decision.requested_amount == 890.0
+    assert any("cap leaking into requested_amount" in w for w in result.warnings)
+    assert any("requested_amount corrected to 890.0" in c for c in result.corrections)
+
+
+def test_run_corrects_requested_amount_even_when_process_refund_correctly_escalates():
+    # The third live-observed shape, and the one the first version of this
+    # fix missed entirely -- caught live on ORD-1005 right after that first
+    # version shipped. check_return_policy's own requires_escalation is
+    # true here (fraud score 61 >= the POL-ESC-01 threshold, 1 prior fraud
+    # flag, 3 claims in 60 days), so process_refund IS called with the
+    # capped $50 and correctly returns ESCALATION_REQUIRED on its own --
+    # not a wrong APPROVED. refund_status ends up right by coincidence, so
+    # neither the tool_status-mismatch check nor the old APPROVED-only
+    # under-request check ever looked at requested_amount here -- it rode
+    # through to Comms's alert payload still saying $50 on a $480 claim.
+    # Real fixture data (ORD-1005/USR-105), not a fake -- process_refund is
+    # dispatched for real, and only genuinely returns ESCALATION_REQUIRED
+    # here because check_return_policy's requires_escalation is real too.
+    risk_report = _risk_report(
+        order_id="ORD-1005",
+        user_id="USR-105",
+        risk_score=90,
+        risk_band="high",
+        blocks_automatic_refund=True,
+        requires_security_channel=True,
+        evidence={"order_total_usd": 480.0, "order_status": "delivered", "prior_fraud_flags": 1},
+    )
+    client = ScriptedClient(
+        [
+            ScriptedResponse([tool_use_block("check_return_policy", {"order_id": "ORD-1005"})]),
+            ScriptedResponse([tool_use_block("process_refund", {"order_id": "ORD-1005", "amount": 50.0})]),
+            _submit(
+                order_id="ORD-1005",
+                user_id="USR-105",
+                requested_amount=50.0,  # the cap -- wrong, the real claim is $480
+                approved_amount=None,
+                refund_id=None,
+                refund_status="ESCALATION_REQUIRED",
+            ),
+        ]
+    )
+    agent = DecisionAgent(client=client, model="x")
+
+    result = agent.run(risk_report, case_id="c7")
+
+    assert result.decision.refund_status == "ESCALATION_REQUIRED"
+    assert result.decision.requested_amount == 480.0
+    assert any("cap leaking into requested_amount" in w for w in result.warnings)
+    assert any("requested_amount corrected to 480.0" in c for c in result.corrections)
+
+
+def test_run_leaves_a_legitimate_partial_requested_amount_alone():
+    # A genuinely partial claim (below the order total, but NOT equal to
+    # the cap) must not be "corrected" up to the full order total -- the
+    # new check's whole point is catching the cap leaking in, not
+    # second-guessing every requested_amount below order_total.
+    risk_report = _risk_report(
+        order_id="ORD-1012",
+        user_id="USR-109",
+        blocks_automatic_refund=True,
+        requires_security_channel=True,
+        evidence={"order_total_usd": 890.0, "order_status": "delivered", "prior_fraud_flags": 0},
+    )
+    client = ScriptedClient(
+        [
+            ScriptedResponse([tool_use_block("check_return_policy", {"order_id": "ORD-1012"})]),
+            _submit(
+                order_id="ORD-1012",
+                user_id="USR-109",
+                requested_amount=200.0,  # a real partial claim, not the $50 cap
+                approved_amount=None,
+                refund_id=None,
+                refund_status="ESCALATION_REQUIRED",
+            ),
+        ]
+    )
+    agent = DecisionAgent(client=client, model="x")
+
+    result = agent.run(risk_report, case_id="c6")
+
+    assert result.decision.requested_amount == 200.0
+    assert result.corrections == []
 
 
 def test_run_blocks_approval_when_risk_report_says_blocks_automatic_refund():

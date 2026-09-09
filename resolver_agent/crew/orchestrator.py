@@ -20,16 +20,18 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import anthropic
+
+import multi_agent_tools as mat  # noqa: E402  (starter-kit/ is on sys.path -- see crew/__init__.py)
 
 from ..agent import DEFAULT_MAX_RETRIES, DEFAULT_MODEL
 from ..logging_utils import get_logger, log_event
 from .comms.agent import CommsAgent
 from .decision.agent import DecisionAgent
 from .researcher.agent import ResearcherAgent
-from .schemas import CrewResult
+from .schemas import CrewResult, RiskReport
 
 _logger = get_logger(__name__)
 
@@ -48,6 +50,61 @@ def _lookup_failure_response(error: Optional[Dict[str, Any]]) -> str:
         "I wasn't able to find the order or account details needed to look into "
         "this -- could you double-check the order number and get back to us?"
     )
+
+
+def _dispatch_fallback_security_alert(risk_report: RiskReport, case_id: str) -> Tuple[Dict[str, Any], bool, Optional[Dict[str, Any]]]:
+    """Page security directly off the Researcher's own report, for a case
+    where the Decision agent failed but the report already says
+    ``requires_security_channel=true``.
+
+    Without this, a Decision-stage failure is otherwise silent on exactly
+    the cases that matter most: the pipeline stops, the customer gets a
+    safe generic reply, and Trust & Safety never hears about a case the
+    Researcher already scored as high risk -- observed for real on a live
+    run (a stalled Decision call on a risk_score=90 case produced zero
+    alert). This is deterministic and code-only, never a model call: it
+    reuses multi_agent_tools.get_escalation_route with the exact same
+    condition (risk_band == 'high' or prior_fraud_flags > 0) that
+    ``requires_security_channel`` itself is defined by, so called only when
+    that flag is true, it can only ever land on the fraud channel a normal
+    run would also have picked.
+    """
+    escalation = mat.get_escalation_route(
+        risk_band=risk_report.risk_band,
+        requested_amount=risk_report.evidence.get("order_total_usd", 0.0),
+        prior_fraud_flags=risk_report.evidence.get("prior_fraud_flags", 0),
+        order_status=risk_report.evidence.get("order_status", "delivered"),
+        verdict="UNKNOWN",  # no policy verdict exists -- the Decision agent never ran check_return_policy
+    )
+    alert_record = mat.send_slack_alert(
+        channel_id=escalation["channel_id"],
+        severity=escalation["severity"],
+        payload={
+            "order_id": risk_report.order_id,
+            "user_id": risk_report.user_id,
+            "risk_score": risk_report.risk_score,
+            "risk_band": risk_report.risk_band,
+            "triggered_rules": [f"{r['rule_id']}: {r['name']}" for r in risk_report.triggered_rules],
+            "requested_amount": risk_report.evidence.get("order_total_usd", 0.0),
+        },
+        message=(
+            f"⚠️ DECISION STAGE INCOMPLETE — order {risk_report.order_id} / "
+            f"customer {risk_report.user_id}\n"
+            f"Risk score: {risk_report.risk_score}/100 ({risk_report.risk_band})\n"
+            "The Decision agent did not produce a verdict for this case -- routed "
+            "directly from the Researcher's risk report for manual review, since "
+            "it already requires the security channel."
+        ),
+    )
+    log_event(
+        _logger,
+        logging.WARNING,
+        "crew.decision_incomplete_fallback_alert",
+        channel=escalation.get("channel"),
+        delivered=bool(alert_record.get("delivered")),
+        case_id=case_id,
+    )
+    return escalation, bool(alert_record.get("delivered")), alert_record
 
 
 class OperationsCrew:
@@ -98,11 +155,26 @@ class OperationsCrew:
         risk_report = researcher_result.report
         decision_result = self.decision_agent.run(risk_report, case_id)
         if decision_result.decision is None:
+            escalation: Optional[Dict[str, Any]] = None
+            alert_sent = False
+            alert_record: Optional[Dict[str, Any]] = None
+            fallback_note = (
+                f"requires_security_channel={risk_report.requires_security_channel} -- "
+                "no direct alert dispatched."
+            )
+            if risk_report.requires_security_channel:
+                escalation, alert_sent, alert_record = _dispatch_fallback_security_alert(risk_report, case_id)
+                fallback_note = (
+                    f"requires_security_channel=true -- dispatched a direct security alert "
+                    f"to {escalation.get('channel')} (alert_sent={alert_sent}), since the "
+                    "Researcher already flagged this case for the security channel."
+                )
             log_event(
                 _logger,
                 logging.WARNING,
                 "crew.decision_incomplete_escalating",
                 error=decision_result.error,
+                fallback_alert_sent=alert_sent,
                 **ctx,
             )
             return CrewResult(
@@ -113,13 +185,14 @@ class OperationsCrew:
                     "will follow up shortly."
                 ),
                 decision=None,
-                escalation=None,
-                alert_sent=False,
-                alert_record=None,
+                escalation=escalation,
+                alert_sent=alert_sent,
+                alert_record=alert_record,
                 reasoning_chain=[
                     f"Risk report: order {risk_report.order_id}, risk_band={risk_report.risk_band} "
                     f"(score {risk_report.risk_score}).",
                     f"Decision agent could not produce a decision: {decision_result.error}.",
+                    fallback_note,
                 ],
                 stopped_reason="decision_incomplete",
             )

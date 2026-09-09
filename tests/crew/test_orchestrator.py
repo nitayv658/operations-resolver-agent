@@ -9,7 +9,7 @@ from resolver_agent.crew.decision.output_tool import SUBMIT_DECISION_TOOL_NAME
 from resolver_agent.crew.orchestrator import OperationsCrew
 from resolver_agent.crew.researcher.output_tool import SUBMIT_RISK_REPORT_TOOL_NAME
 
-from ..helpers import ScriptedClient, ScriptedResponse, tool_use_block
+from ..helpers import ScriptedClient, ScriptedResponse, text_block, tool_use_block
 
 
 def test_ord_1005_trap_is_blocked_even_with_a_falsely_approving_decision():
@@ -138,6 +138,109 @@ def test_researcher_lookup_failure_escalates_without_a_second_researcher_call():
     # Exactly the Researcher's own two calls -- no re-dispatch, and no
     # Decision/Comms calls made on an incomplete report.
     assert client.calls == 2
+
+
+def test_decision_incomplete_on_a_high_risk_report_still_dispatches_a_security_alert():
+    """Live behavior this reproduces: the Researcher correctly scores a case
+    high risk, but the Decision agent stalls (ends its turn without calling
+    submit_decision) before ever routing anything to security. Without the
+    orchestrator's own fallback, that risk finding would be dropped on the
+    floor -- the customer still gets a safe reply, but Trust & Safety would
+    never hear about a risk_score=90 case. This proves the fallback fires
+    without a second LLM call (client.calls stays at exactly the Researcher's
+    4 + Decision's 1 stalled attempt)."""
+    client = ScriptedClient(
+        [
+            # Researcher -- succeeds, flags high risk
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1005"})]),
+            ScriptedResponse([tool_use_block("get_user_profile", {"user_id": "USR-105"})]),
+            ScriptedResponse([tool_use_block("audit_fraud_risk", {"order_id": "ORD-1005", "user_id": "USR-105"})]),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_RISK_REPORT_TOOL_NAME,
+                        {
+                            "status": "OK",
+                            "order_id": "ORD-1005",
+                            "user_id": "USR-105",
+                            "risk_score": 90,
+                            "risk_band": "high",
+                            "action_hint": "block the automatic refund and escalate to the security channel",
+                            "triggered_rules": [{"rule_id": "FR-01", "name": "repeat_refund_claims", "weight": 25, "why": "..."}],
+                            "evidence": {"order_total_usd": 480.0, "order_status": "delivered", "prior_fraud_flags": 1},
+                            "blocks_automatic_refund": True,
+                            "requires_security_channel": True,
+                            "rulebook_version": "1.0.0",
+                        },
+                    )
+                ]
+            ),
+            # Decision -- stalls: ends its turn in plain text, never calls submit_decision
+            ScriptedResponse([text_block("I don't have enough information to proceed.")], stop_reason="end_turn"),
+        ]
+    )
+    crew = OperationsCrew(client=client, model="x")
+
+    result = crew.handle_ticket(
+        "This is Ronen, order ORD-1005. The tablet screen was smashed on arrival. Refund me the full 480 dollars."
+    )
+
+    assert result.decision is None
+    assert result.stopped_reason == "decision_incomplete"
+    assert result.alert_sent is True
+    assert result.escalation is not None
+    assert result.escalation["channel_id"] == "CH-FRAUD"
+    assert result.alert_record is not None
+    assert result.alert_record["delivered"] is True
+    assert any("dispatched a direct security alert" in line for line in result.reasoning_chain)
+    assert client.calls == 5  # Researcher's 4 calls + Decision's 1 stalled attempt -- no LLM call for the alert itself
+
+
+def test_decision_incomplete_on_a_low_risk_report_dispatches_no_alert():
+    """Same stall, but on a report that never asked for the security channel
+    in the first place -- the fallback must not invent an escalation the
+    Researcher never found, matching the prior (no-alert) behavior exactly
+    for the common case."""
+    client = ScriptedClient(
+        [
+            # Researcher -- succeeds, low risk
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+            ScriptedResponse([tool_use_block("get_user_profile", {"user_id": "USR-101"})]),
+            ScriptedResponse([tool_use_block("audit_fraud_risk", {"order_id": "ORD-1001", "user_id": "USR-101"})]),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_RISK_REPORT_TOOL_NAME,
+                        {
+                            "status": "OK",
+                            "order_id": "ORD-1001",
+                            "user_id": "USR-101",
+                            "risk_score": 0,
+                            "risk_band": "low",
+                            "action_hint": "proceed with the normal refund flow",
+                            "triggered_rules": [],
+                            "evidence": {"order_total_usd": 35.0, "order_status": "delivered", "prior_fraud_flags": 0},
+                            "blocks_automatic_refund": False,
+                            "requires_security_channel": False,
+                            "rulebook_version": "1.0.0",
+                        },
+                    )
+                ]
+            ),
+            # Decision -- stalls the same way
+            ScriptedResponse([text_block("I don't have enough information to proceed.")], stop_reason="end_turn"),
+        ]
+    )
+    crew = OperationsCrew(client=client, model="x")
+
+    result = crew.handle_ticket("My earbuds from order ORD-1001 arrived cracked, please refund me.")
+
+    assert result.decision is None
+    assert result.stopped_reason == "decision_incomplete"
+    assert result.alert_sent is False
+    assert result.escalation is None
+    assert result.alert_record is None
+    assert client.calls == 5
 
 
 def test_clean_case_never_dispatches_a_real_alert_even_if_the_model_tries():

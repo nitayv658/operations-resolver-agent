@@ -218,6 +218,28 @@ def test_run_tool_loop_should_add_cache_control_breakpoints_to_system_and_tools(
     assert tool_schemas == original_schemas
 
 
+def test_run_tool_loop_should_default_max_tokens_to_4096_when_caller_does_not_override(
+    tool_schemas, tool_registry
+):
+    """Raised from 2048 after a live run of the Part 2 crew hit exactly that
+    ceiling on a real case -- see run_tool_loop's own docstring. Callers
+    that need a different value can still pass their own max_tokens; this
+    only pins the default."""
+    client = ScriptedClient([_submit()])
+
+    run_tool_loop(
+        client=client,
+        model="mock",
+        system="(unused)",
+        messages=[{"role": "user", "content": "(scripted ticket)"}],
+        tool_schemas=tool_schemas,
+        tool_registry=tool_registry,
+        stop_tool_name=SUBMIT_RESOLUTION_TOOL_NAME,
+    )
+
+    assert client.call_kwargs[-1]["max_tokens"] == 4096
+
+
 def test_run_tool_loop_when_model_names_unknown_tool_should_return_error_dict_without_crashing(
     tool_schemas, tool_registry
 ):
@@ -358,6 +380,55 @@ def test_run_tool_loop_when_max_iterations_reached_should_log_warning(tool_schem
         )
 
     assert any(r.getMessage() == "tool_loop.max_iterations_reached" for r in caplog.records)
+
+
+def test_run_tool_loop_when_model_stops_without_tool_call_should_log_the_text(
+    tool_schemas, tool_registry, caplog
+):
+    """A turn that ends in plain text instead of a tool call is otherwise a
+    silent dead end -- the caller only ever learns stopped_reason='stop',
+    with no way to see what the model actually said. This is the exact
+    failure mode observed live on the Part 2 crew's Decision agent, where
+    it was undiagnosable after the fact for lack of exactly this log line.
+    """
+    with caplog.at_level(logging.WARNING, logger="resolver_agent.tool_loop"):
+        result = _run(
+            [
+                ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+                ScriptedResponse([text_block("I don't have enough information to proceed.")], stop_reason="end_turn"),
+            ],
+            tool_schemas,
+            tool_registry,
+        )
+
+    assert result.stopped_reason == "stop"
+    records = [r for r in caplog.records if r.getMessage() == "tool_loop.stopped_without_tool_call"]
+    assert len(records) == 1
+    assert records[0].fields["api_stop_reason"] == "end_turn"
+    assert records[0].fields["text"] == "I don't have enough information to proceed."
+
+
+def test_run_tool_loop_when_forced_final_call_produces_no_stop_tool_should_log_the_text(
+    tool_schemas, tool_registry, caplog
+):
+    with caplog.at_level(logging.WARNING, logger="resolver_agent.tool_loop"):
+        result = _run(
+            [
+                ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+                ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1002"})]),
+                # forced call (tool_choice pinned to the stop tool): model still doesn't comply
+                ScriptedResponse([text_block("I'm not sure what to do.")], stop_reason="end_turn"),
+            ],
+            tool_schemas,
+            tool_registry,
+            max_iterations=2,
+        )
+
+    assert result.stopped_reason == "max_iterations"
+    records = [r for r in caplog.records if r.getMessage() == "tool_loop.forced_call_did_not_call_stop_tool"]
+    assert len(records) == 1
+    assert records[0].fields["api_stop_reason"] == "end_turn"
+    assert records[0].fields["text"] == "I'm not sure what to do."
 
 
 def test_run_tool_loop_when_log_context_given_should_be_merged_into_every_record(
