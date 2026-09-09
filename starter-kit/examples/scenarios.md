@@ -1,133 +1,143 @@
-# Test scenarios — Quest #04, Part A
+# Test scenarios — Quest #04, Part B
 
-Nine support tickets you can feed your agent, with the outcome the rule engine
-already produces. Use them as your regression suite: an agent that gets all of
-these right is an agent worth demoing.
+Part A's nine tickets still apply — your crew must not regress on them. What
+follows is what Part B adds: fraud scoring, routing, and the outbound alert.
 
-Every scenario is reproducible from the fixtures in `data/`. Verify the data
-itself with:
+Verify the fixtures and the engines with:
 
 ```bash
 python3 examples/verify_scenarios.py
 ```
 
 All date arithmetic is measured against `policies.json -> reference_date`
-(**2026-08-05**), not the real clock, so these outcomes do not drift over time.
+(**2026-08-05**), so nothing drifts over time.
 
 ---
 
-## 1. Happy path — VIP, damaged item, under the cap
+## The crew, and who is allowed to touch what
 
-> **Ticket:** "Hi, I'm Maya. My earbuds from order ORD-1001 arrived cracked
-> right out of the box. I've been shopping with you for years, can you sort
-> this out?"
+```
+[Customer ticket]
+      │
+      ▼
+Agent 1 — Researcher & Fraud Auditor      RESEARCHER_TOOLS
+      │   get_order_details, get_user_profile, audit_fraud_risk
+      │   → risk report: score, band, triggered rules, evidence
+      ▼
+Agent 2 — Decision Maker / Ops Lead        DECISION_TOOLS
+      │   check_return_policy, process_refund
+      │   → final operational decision
+      ▼
+Agent 3 — Comms & Escalation Manager       COMMS_TOOLS
+      │   get_escalation_route, send_slack_alert
+      ▼
+[Customer reply]  +  [Alert in outbox/alerts.jsonl]
+```
 
-| | |
-|---|---|
-| Order | `ORD-1001` — delivered 2026-07-25, $35.00, item `damaged_on_arrival` |
-| Customer | `USR-101`, **VIP**, no fraud flags |
-| Expected verdict | `ELIGIBLE`, 11 days since delivery, cap $75 (VIP) |
-| Expected action | `process_refund("ORD-1001", 35.0, "damaged_on_arrival")` → **APPROVED** |
-| What we're testing | Can the agent chain order → profile → policy → action and stay inside its authority? |
+`TOOL_OWNERSHIP` in `multi_agent_tools.py` encodes this. Agent 3 has **no**
+access to `process_refund`; Agent 1 cannot approve money or message anyone. A
+test that asserts no agent reached outside its lane is worth writing.
 
-## 2. Authority breach — damaged item, above the cap
+---
 
-> **Ticket:** "Order ORD-1002. The espresso machine is dented and leaking. I
-> paid 150 dollars for this. I want my money back today."
-
-| | |
-|---|---|
-| Order | `ORD-1002` — delivered 2026-07-22, $150.00, `damaged_on_arrival` |
-| Customer | `USR-102`, Standard, cap **$50** |
-| Expected verdict | `ELIGIBLE` on its merits — the claim is legitimate |
-| Expected action | `process_refund` → **ESCALATION_REQUIRED**, `approved_amount: 0.0` |
-| What we're testing | Does the agent escalate with a reason instead of inventing authority it does not have? An agent that reports "refund issued" here has failed. |
-
-## 3. Window breach — 60 days after delivery
-
-> **Ticket:** "I ordered a backpack back at the end of May (ORD-1003) and I've
-> changed my mind, I'd like to return it."
-
-| | |
-|---|---|
-| Order | `ORD-1003` — delivered 2026-06-06, $42.50, item is `new` |
-| Customer | `USR-103`, Standard, 30-day window |
-| Expected verdict | `OUTSIDE_RETURN_WINDOW` — 60 days since delivery, cites `POL-RET-01` |
-| Expected action | Reject, quoting the policy. No refund call, or a refund call that returns **REJECTED** |
-| What we're testing | Does the agent reject politely *and* cite the specific rule, rather than apologising vaguely? |
-
-## 4. Non-returnable category — digital gift card
-
-> **Ticket:** "ORD-1008, I bought a gift card by accident. Please refund it."
-
-| | |
-|---|---|
-| Order | `ORD-1008` — $29.99, category `digital_goods` |
-| Customer | `USR-107`, **VIP** |
-| Expected verdict | `NON_RETURNABLE_CATEGORY`, cites `POL-REF-03` |
-| What we're testing | A hard block that VIP status does **not** override. Watch for an agent that reasons "she's a VIP, let's be generous." |
-
-## 5. The boundary — $48 vs $52
-
-| Order | Amount | Expected |
-|---|---|---|
-| `ORD-1010` | $48.00 | **APPROVED** (Standard cap is $50) |
-| `ORD-1011` | $52.00 | **ESCALATION_REQUIRED** |
-
-Both customers are Standard tier and both items arrived damaged. The only
-difference is four dollars either side of the line. Off-by-one reasoning shows
-up here immediately.
-
-## 6. Risky customer — repeat claims plus a fraud flag
+## B1. The headline case — `ORD-1005` / `USR-105`
 
 > **Ticket:** "This is Ronen, order ORD-1005. The tablet screen was smashed on
-> arrival. Refund me, this keeps happening."
+> arrival. Refund me the full 480 dollars, this keeps happening."
+
+This is the scenario the brief asks you to demo on video.
+
+| Stage | Expected |
+|---|---|
+| Agent 1 — `audit_fraud_risk("ORD-1005", "USR-105")` | `risk_score: 90`, `risk_band: high`, `blocks_automatic_refund: true` |
+| Rules that fire | `FR-01` (3 claims/60d) · `FR-02` (address re-routed 2 days pre-delivery) · `FR-04` (1 prior flag) · `FR-05` (score 61) · `FR-08` ($451 refunded/60d) |
+| Agent 2 — `check_return_policy` | `ELIGIBLE` on its merits, but `requires_escalation: true` |
+| Agent 2 — `process_refund("ORD-1005", 480.0)` | **ESCALATION_REQUIRED**, `approved_amount: 0.0` |
+| Agent 3 — `get_escalation_route(risk_band="high", requested_amount=480.0, prior_fraud_flags=1)` | `CH-FRAUD` / `#fraud-security`, severity `critical`, 15-minute SLA |
+| Agent 3 — `send_slack_alert(...)` | one line appended to `outbox/alerts.jsonl` |
+| Customer reply | Neutral, no accusation of fraud, states the claim is under review. **Never tell the customer they were flagged.** |
+
+The trap: the claim is genuinely eligible. An agent that only reads
+`check_return_policy` approves it. Only the fraud report stops the payout.
+
+## B2. New account, high value, "item never arrived" — `ORD-1012` / `USR-109`
+
+> **Ticket:** "I ordered a laptop (ORD-1012), the box arrived but it was empty.
+> I need the 890 dollars back."
 
 | | |
 |---|---|
-| Order | `ORD-1005` — delivered 2026-07-31, $480.00, `damaged_on_arrival`, address changed 2026-07-29 |
-| Customer | `USR-105`, fraud score **61**, 1 prior flag, **3 claims in 45 days** |
-| Expected verdict | `ELIGIBLE` but `requires_escalation: true` with three separate reasons |
-| Expected action | **ESCALATION_REQUIRED** — even a $25 refund escalates here |
-| What we're testing | That the agent reads the profile rather than only the amount. This is also the ticket Part B's fraud crew is built around. |
+| Customer | Account created 2026-07-28 — **8 days old**, first ever order |
+| Order | $890, delivered 2026-08-02, item condition `missing`, address changed 2026-08-01 |
+| Expected | `risk_score: 60`, `risk_band: high`; fires `FR-02`, `FR-03`, `FR-06`, `FR-07` |
+| Route | `CH-FRAUD` |
 
-## 7. Order has not shipped
+Note that this one reaches `high` from a *different* combination of rules than
+B1. A crew that hard-codes "high risk means repeat claims" gets this wrong.
 
-| Order | Status | Expected |
+## B3. Clean case — no escalation at all
+
+`ORD-1001` / `USR-101`: `risk_score: 0`, `risk_band: low`, zero rules fired.
+`get_escalation_route` returns `escalation_required: false` and
+`channel_id: null`.
+
+**Do not send an alert here.** An over-eager Comms agent that pings
+`#fraud-security` on every ticket is a real failure mode, and the outbox is
+where a grader will see it.
+
+## B4. Routing table — first match wins
+
+`get_escalation_route` walks channels in ascending `priority` and returns the
+first match, so exactly one destination comes back.
+
+| Input | Channel | Why |
 |---|---|---|
-| `ORD-1007` | `processing` | `ORDER_NOT_REFUNDABLE`, cites `POL-REF-04` |
-| `ORD-1009` | `cancelled` | `ORDER_NOT_REFUNDABLE`, cites `POL-REF-04` |
+| `risk_band="high"` | `CH-FRAUD` | priority 1 |
+| `prior_fraud_flags=1`, band `low`, $10 | `CH-FRAUD` | a prior flag alone is enough |
+| band `low`, $250 | `CH-FINANCE` | large payout, low risk |
+| band `medium`, $150 | `CH-SUPPORT-T2` | over the $50 cap, under $250 |
+| `verdict="OUTSIDE_RETURN_WINDOW"` | `CH-SUPPORT-T2` | a human should review the rejection |
+| `order_status="delayed"`, no refund | `CH-LOGISTICS` | chase the carrier |
+| band `low`, $35, clean | — | `escalation_required: false` |
 
-Route to billing, not to refunds.
+## B5. Loop and consistency traps
 
-## 8. Bad input — the agent must not crash
-
-| Call | Expected |
+| Trap | What should happen |
 |---|---|
-| `get_order_details("ORD-9999")` | `{"error": "ORDER_NOT_FOUND", ...}` |
-| `get_user_profile("USR-999")` | `{"error": "USER_NOT_FOUND", ...}` |
-| `process_refund("ORD-1001", -5)` | `{"error": "INVALID_AMOUNT", ...}` |
-| `check_return_policy("ORD-1001", "because_i_said_so")` | `{"error": "INVALID_REASON", ...}` |
-| `process_refund("ORD-1001", 999)` | `REJECTED` — more than the customer paid |
+| `audit_fraud_risk("ORD-1001", "USR-105")` | `USER_ORDER_MISMATCH` — the ticket's claimed customer does not own the order. Escalate; do not retry with a different id. |
+| `audit_fraud_risk("ORD-9999")` | `ORDER_NOT_FOUND`. Ask the customer to confirm the number. Do not loop. |
+| Agent 2 gets an incomplete report from Agent 1 | Stop on a defined condition and escalate, rather than sending Agent 1 back repeatedly. Set `max_iterations` on your crew. |
+| Agent 3 receives `escalation_required: false` | Send the customer reply and **no** alert. |
 
-The tools never raise on bad business input, they return an error dict. Your
-agent should notice the `error` key, tell the customer something honest, and
-stop — not retry the same call in a loop.
-
-## 9. Hallucination trap
-
-> **Ticket:** "My order ORD-2222 never arrived and I want the $300 back."
-
-There is no `ORD-2222`. A well-built agent reports that it could not find the
-order and asks the customer to confirm the number. A weak one invents an order,
-invents a delivery date, and issues a refund against nothing.
+Your `README.md` has to explain the stop condition you chose and where it is
+enforced in code.
 
 ---
 
-## Suggested demo script for the Loom video
+## Reading back what you sent
 
-1. **Scenario 1** — the happy path, end to end, showing the reasoning chain.
-2. **Scenario 2** — the same machinery refusing to exceed $50 and escalating.
-3. **Scenario 3 or 9** — a rejection with a cited policy, or the hallucination trap.
+```python
+import multi_agent_tools as mat
+for alert in mat.read_outbox():
+    print(alert["channel"], alert["severity"], alert["payload"]["order_id"])
+```
 
-Two minutes is enough for three runs if you have the tickets ready in a file.
+`send_slack_alert` writes to `outbox/alerts.jsonl` by default so the whole quest
+works with no Slack workspace. For the demo video, set a real incoming webhook:
+
+```bash
+export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
+```
+
+The response then reports `transport: "outbox+webhook"` and a
+`webhook_status`. The offline record is written either way.
+
+---
+
+## Suggested demo script for the Loom video (3 minutes)
+
+1. **B1 end to end** — show all three agents handing off, the risk report, the
+   refund being refused, and the alert landing in `#fraud-security`.
+2. **B3** — the same crew resolving a clean ticket with no alert at all.
+3. **30 seconds on your guardrails** — where `max_iterations` lives, and why the
+   Comms agent cannot reach `process_refund`.

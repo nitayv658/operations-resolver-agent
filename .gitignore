@@ -16,3 +16,7 @@ Quest 4_files/
 # (ESCALATION_REQUIRED / CANNOT_RESOLVE records) -- not source, never committed.
 escalation_queue.jsonl
 demo_escalation_queue.jsonl
+
+# Runtime alert artifact written by multi_agent_tools.send_slack_alert --
+# not source, never committed (same treatment as escalation_queue.jsonl above).
+starter-kit/outbox/*.jsonl

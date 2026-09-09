@@ -65,7 +65,18 @@ class ModelAPIError(RuntimeError):
 
 
 def _signature(name: str, tool_input: Dict[str, Any]) -> tuple:
-    return (name, tuple(sorted(tool_input.items())))
+    """A hashable, order-independent fingerprint of one tool call.
+
+    ``tuple(sorted(tool_input.items()))`` (the original implementation) broke
+    as soon as any argument value was itself unhashable -- e.g. a dict, which
+    Part 2's ``send_slack_alert(payload: dict, ...)`` genuinely needs. JSON
+    serialization handles arbitrarily nested dict/list arguments while still
+    treating two calls with the same name and same argument values (in any
+    key order) as the same signature -- ``sort_keys=True`` makes the string
+    itself order-independent, same guarantee ``tuple(sorted(...))`` gave for
+    the flat case.
+    """
+    return (name, json.dumps(tool_input, sort_keys=True, default=str))
 
 
 def _stringify(result: Any) -> str:
@@ -73,6 +84,19 @@ def _stringify(result: Any) -> str:
         return json.dumps(result)
     except TypeError:
         return str(result)
+
+
+def _text_of(response: Any) -> Optional[str]:
+    """Concatenate a response's text blocks, if any.
+
+    Used only for logging a turn that didn't produce the tool call the
+    caller was waiting for -- that text is otherwise discarded entirely
+    (the caller only ever sees ``stopped_reason='stop'`` or
+    ``'max_iterations'``), which makes this exact failure mode
+    undebuggable from production logs alone.
+    """
+    parts = [block.text for block in response.content if getattr(block, "type", None) == "text"]
+    return "".join(parts) if parts else None
 
 
 def _create(client: "anthropic.Anthropic", tool_calls_so_far: List[ToolCallRecord], **kwargs: Any) -> Any:
@@ -123,7 +147,7 @@ def run_tool_loop(
     stop_tool_name: Optional[str] = None,
     max_iterations: int = 8,
     temperature: Optional[float] = None,
-    max_tokens: int = 2048,
+    max_tokens: int = 4096,
     log_context: Optional[Dict[str, Any]] = None,
 ) -> ToolLoopResult:
     """Run send -> tool_use -> tool_result -> send until the model stops.
@@ -144,6 +168,15 @@ def run_tool_loop(
     A tool call repeated with the exact same arguments is not re-executed --
     a synthetic tool_result tells the model the retry was refused. This is
     what stops a confused agent from looping on the same failing call.
+
+    ``max_tokens`` defaults to 4096, not the API's own default of 1024 or
+    the 2048 this used to be -- raised after a live run of the Part 2 crew
+    hit exactly this ceiling on a real case (5 triggered fraud rules to
+    reason through before the tool call): the turn came back with
+    ``stop_reason='max_tokens'`` and no tool call at all, silently
+    truncated mid-turn. Extended thinking content counts against this
+    budget too, so a caller doing heavier reasoning can still hit it; this
+    default is a data point from one real failure, not a guarantee.
 
     Raises:
         ValueError: if ``max_iterations`` is not at least 1. The loop's
@@ -183,6 +216,14 @@ def run_tool_loop(
         )
 
         if response.stop_reason != "tool_use":
+            log_event(
+                _logger,
+                logging.WARNING,
+                "tool_loop.stopped_without_tool_call",
+                api_stop_reason=response.stop_reason,
+                text=_text_of(response),
+                **ctx,
+            )
             return ToolLoopResult(response, messages, tool_calls, "stop")
 
         messages.append({"role": "assistant", "content": response.content})
@@ -274,8 +315,19 @@ def run_tool_loop(
             **extra_kwargs,
         )
         messages.append({"role": "assistant", "content": response.content})
+        made_stop_call = False
         for block in response.content:
             if block.type == "tool_use" and block.name == stop_tool_name:
                 tool_calls.append(ToolCallRecord(block.name, block.input, None))
+                made_stop_call = True
+        if not made_stop_call:
+            log_event(
+                _logger,
+                logging.WARNING,
+                "tool_loop.forced_call_did_not_call_stop_tool",
+                api_stop_reason=response.stop_reason,
+                text=_text_of(response),
+                **ctx,
+            )
 
     return ToolLoopResult(response, messages, tool_calls, "max_iterations")
