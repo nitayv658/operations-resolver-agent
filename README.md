@@ -5,8 +5,6 @@ GlobalCart support tickets: it reads the ticket, calls tools to look up the
 order/customer/policy, decides on an operational outcome (auto-refund /
 reject / escalate), and returns structured, auditable output.
 
-> 🇮🇱 גרסה עברית: [`README.he.md`](README.he.md) — same content, same structure.
-
 > 📓 [`demo.ipynb`](demo.ipynb) — a runnable walkthrough against the live
 > API and real starter-kit tools (happy path, authority breach, hallucination
 > trap, cross-customer authorization, the full 10-ticket regression suite,
