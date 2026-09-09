@@ -351,56 +351,10 @@ def test_resolver_agent_when_max_iterations_is_not_positive_should_raise_at_cons
 
 
 # --------------------------------------------------------------------------- #
-# requester_user_id / cross-customer authorization. ORD-1001 belongs to
-# USR-101 (Maya) in the real starter-kit fixtures.
+# requester_user_id / cross-customer authorization at the resolve() level.
+# The authorize_tool_registry unit tests themselves live in
+# tests/test_authorization.py, alongside the module they test.
 # --------------------------------------------------------------------------- #
-
-
-def test_authorize_tool_registry_when_owner_matches_requester_should_pass_through_real_data():
-    from resolver_agent.agent import _authorize_tool_registry, gc
-
-    registry = _authorize_tool_registry(dict(gc.TOOL_REGISTRY), requester_user_id="USR-101", log_context={})
-    result = registry["get_order_details"](order_id="ORD-1001")
-
-    assert result["order_id"] == "ORD-1001"
-    assert "error" not in result
-
-
-def test_authorize_tool_registry_when_owner_does_not_match_requester_should_deny():
-    from resolver_agent.agent import _authorize_tool_registry, gc
-
-    registry = _authorize_tool_registry(dict(gc.TOOL_REGISTRY), requester_user_id="USR-999", log_context={})
-    result = registry["get_order_details"](order_id="ORD-1001")  # actually belongs to USR-101
-
-    assert result == {
-        "error": "NOT_AUTHORIZED",
-        "message": "This record does not belong to the requesting customer.",
-    }
-
-
-def test_authorize_tool_registry_should_deny_across_all_four_tools_not_just_lookups():
-    # Every GlobalCart tool's successful result carries a user_id field --
-    # confirmed by reading mock_services.py -- so the same protection must
-    # cover check_return_policy/process_refund, not just the two obvious
-    # lookup tools.
-    from resolver_agent.agent import _authorize_tool_registry, gc
-
-    registry = _authorize_tool_registry(dict(gc.TOOL_REGISTRY), requester_user_id="USR-999", log_context={})
-
-    assert registry["get_user_profile"](user_id="USR-101")["error"] == "NOT_AUTHORIZED"
-    assert registry["check_return_policy"](order_id="ORD-1001")["error"] == "NOT_AUTHORIZED"
-    assert registry["process_refund"](order_id="ORD-1001", amount=35.0)["error"] == "NOT_AUTHORIZED"
-
-
-def test_authorize_tool_registry_should_not_mask_genuine_tool_errors():
-    # A nonexistent order must still surface as ORDER_NOT_FOUND, not get
-    # relabeled as an authorization failure.
-    from resolver_agent.agent import _authorize_tool_registry, gc
-
-    registry = _authorize_tool_registry(dict(gc.TOOL_REGISTRY), requester_user_id="USR-101", log_context={})
-    result = registry["get_order_details"](order_id="ORD-9999")
-
-    assert result["error"] == "ORDER_NOT_FOUND"
 
 
 def test_resolve_when_requester_user_id_matches_order_owner_should_proceed_normally():
