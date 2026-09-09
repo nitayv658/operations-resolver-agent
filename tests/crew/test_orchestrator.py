@@ -314,3 +314,59 @@ def test_clean_case_never_dispatches_a_real_alert_even_if_the_model_tries():
     assert result.decision.refund_status == "APPROVED"
     assert result.alert_sent is False
     assert result.alert_record is None
+
+
+def test_per_agent_model_overrides_reach_their_own_agent_only():
+    """researcher_model/decision_model/comms_model are independent overrides
+    -- each sub-agent gets its own value, not the shared `model`."""
+    crew = OperationsCrew(
+        client=ScriptedClient([]),
+        model="shared-default",
+        researcher_model="researcher-model",
+        decision_model="decision-model",
+        comms_model="comms-model",
+    )
+
+    assert crew.researcher.model == "researcher-model"
+    assert crew.decision_agent.model == "decision-model"
+    assert crew.comms_agent.model == "comms-model"
+
+
+def test_model_kwarg_alone_still_applies_to_all_three_agents():
+    """No per-agent overrides given -- `model=` remains the shared fallback
+    for all three, matching every existing call site/test in this file."""
+    crew = OperationsCrew(client=ScriptedClient([]), model="x")
+
+    assert crew.researcher.model == "x"
+    assert crew.decision_agent.model == "x"
+    assert crew.comms_agent.model == "x"
+
+
+def test_per_agent_env_vars_apply_when_no_kwarg_is_passed(monkeypatch):
+    """The middle tier of the resolution order (kwarg -> env var -> shared
+    model) -- run_crew.py/run_crew_scenarios.py both construct
+    OperationsCrew() with no per-agent kwargs at all, so this env-var path
+    is the only way either entry point can actually reach it."""
+    monkeypatch.setenv("ANTHROPIC_MODEL_RESEARCHER", "researcher-from-env")
+    monkeypatch.setenv("ANTHROPIC_MODEL_DECISION", "decision-from-env")
+    monkeypatch.delenv("ANTHROPIC_MODEL_COMMS", raising=False)  # left unset -- should fall through to `model`
+
+    crew = OperationsCrew(client=ScriptedClient([]), model="shared-default")
+
+    assert crew.researcher.model == "researcher-from-env"
+    assert crew.decision_agent.model == "decision-from-env"
+    assert crew.comms_agent.model == "shared-default"
+
+
+def test_explicit_kwarg_wins_over_env_var(monkeypatch):
+    """Completes the precedence chain: an explicit kwarg beats its own env
+    var, even when both are set for the same agent."""
+    monkeypatch.setenv("ANTHROPIC_MODEL_DECISION", "decision-from-env")
+
+    crew = OperationsCrew(
+        client=ScriptedClient([]),
+        model="shared-default",
+        decision_model="decision-from-kwarg",
+    )
+
+    assert crew.decision_agent.model == "decision-from-kwarg"

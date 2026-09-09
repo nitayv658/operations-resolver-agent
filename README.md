@@ -458,11 +458,34 @@ webhook, otherwise it's written to `starter-kit/outbox/alerts.jsonl`).
 scenarios plus a Part 1 regression spot-check, the same role
 `run_scenarios.py` plays for Part 1.
 
+### Choosing a model per agent
+
+`OperationsCrew(model=...)` still sets one model for all three agents, as
+before. Each agent's model can now also be set independently —
+`researcher_model` / `decision_model` / `comms_model` kwargs, or the
+matching `ANTHROPIC_MODEL_RESEARCHER` / `ANTHROPIC_MODEL_DECISION` /
+`ANTHROPIC_MODEL_COMMS` env vars (see `.env.example`) for `run_crew.py` and
+`run_crew_scenarios.py`, which construct `OperationsCrew()` with no kwargs
+at all. Resolution order per agent: explicit kwarg, then that agent's own
+env var, then the shared `model` — so every existing caller that only
+passes `model=` keeps applying it to all three, unchanged.
+
+The reason to split them: the three agents don't carry the same stakes.
+`DecisionAgent` is the only one with financial authority
+(`process_refund`) and the one whose ORD-1005-style fraud-override
+reasoning is worth a stronger model. `CommsAgent` is comparatively
+templated — escalation routing and the customer reply — and already
+guardrailed in code (`_guarded_registry`, `_safe_customer_response`), so a
+cheaper model is a reasonable place to economize. `ResearcherAgent` sits in
+between: its judgment (which fraud rules matter, whether `action_hint`
+reflects the tool's real output) feeds directly into Decision, so it isn't
+the place to cut first either.
+
 ### Testing this design
 
-`tests/crew/` (26 tests) follows the same split Part 1 uses: a scripted
+`tests/crew/` (30 tests) follows the same split Part 1 uses: a scripted
 fake model drives each agent and the orchestrator through the real
-starter-kit tools, so the whole suite — 136 tests total across both parts —
+starter-kit tools, so the whole suite — 140 tests total across both parts —
 runs deterministically with no API key. `tests/crew/test_tool_ownership.py`
 specifically asserts each agent's registry only contains the tool names
 `TOOL_OWNERSHIP` assigns it, so the authority-separation guarantee above is
