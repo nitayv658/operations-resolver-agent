@@ -218,6 +218,28 @@ def test_run_tool_loop_should_add_cache_control_breakpoints_to_system_and_tools(
     assert tool_schemas == original_schemas
 
 
+def test_run_tool_loop_should_default_max_tokens_to_4096_when_caller_does_not_override(
+    tool_schemas, tool_registry
+):
+    """Raised from 2048 after a live run of the Part 2 crew hit exactly that
+    ceiling on a real case -- see run_tool_loop's own docstring. Callers
+    that need a different value can still pass their own max_tokens; this
+    only pins the default."""
+    client = ScriptedClient([_submit()])
+
+    run_tool_loop(
+        client=client,
+        model="mock",
+        system="(unused)",
+        messages=[{"role": "user", "content": "(scripted ticket)"}],
+        tool_schemas=tool_schemas,
+        tool_registry=tool_registry,
+        stop_tool_name=SUBMIT_RESOLUTION_TOOL_NAME,
+    )
+
+    assert client.call_kwargs[-1]["max_tokens"] == 4096
+
+
 def test_run_tool_loop_when_model_names_unknown_tool_should_return_error_dict_without_crashing(
     tool_schemas, tool_registry
 ):

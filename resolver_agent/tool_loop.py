@@ -147,7 +147,7 @@ def run_tool_loop(
     stop_tool_name: Optional[str] = None,
     max_iterations: int = 8,
     temperature: Optional[float] = None,
-    max_tokens: int = 2048,
+    max_tokens: int = 4096,
     log_context: Optional[Dict[str, Any]] = None,
 ) -> ToolLoopResult:
     """Run send -> tool_use -> tool_result -> send until the model stops.
@@ -168,6 +168,15 @@ def run_tool_loop(
     A tool call repeated with the exact same arguments is not re-executed --
     a synthetic tool_result tells the model the retry was refused. This is
     what stops a confused agent from looping on the same failing call.
+
+    ``max_tokens`` defaults to 4096, not the API's own default of 1024 or
+    the 2048 this used to be -- raised after a live run of the Part 2 crew
+    hit exactly this ceiling on a real case (5 triggered fraud rules to
+    reason through before the tool call): the turn came back with
+    ``stop_reason='max_tokens'`` and no tool call at all, silently
+    truncated mid-turn. Extended thinking content counts against this
+    budget too, so a caller doing heavier reasoning can still hit it; this
+    default is a data point from one real failure, not a guarantee.
 
     Raises:
         ValueError: if ``max_iterations`` is not at least 1. The loop's
