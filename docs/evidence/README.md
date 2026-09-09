@@ -72,7 +72,7 @@ expected.
 
 Both are documented as design decisions in the top-level [README](../../README.md#part-2--distributed-agent-crew); this run shows each actually firing, not just being reasoned about — visible in the JSONL, not the stdout transcript, since `run_crew_scenarios.py` only prints the final `refund_status` and reply.
 
-- **P1-2** (`case_id=a12c111c`): the Decision agent called `process_refund`
+- **P1-2** (`case_id=18177edb`): the Decision agent called `process_refund`
   for exactly `$50.00` — the auto-refund cap — instead of the real `$150.00`
   order total, and `process_refund` came back a clean `APPROVED` (it
   enforces its cap, not intent). `decision.corrected` fires with
@@ -81,7 +81,7 @@ Both are documented as design decisions in the top-level [README](../../README.m
   `refund_status` from `APPROVED` to `ESCALATION_REQUIRED`, and corrected
   `requested_amount` back to the real `$150.00` — deterministically, no
   second model call. The customer never saw a wrong answer.
-- **P1-8** (`case_id=fdf23778`): the Researcher's own `action_hint` text
+- **P1-8** (`case_id=47016fef`): the Researcher's own `action_hint` text
   drifted from what `audit_fraud_risk` actually returned (it added an
   unprompted note about verifying digital-goods refund policy).
   `researcher.report_corrected` fires with `correction_count=1`:

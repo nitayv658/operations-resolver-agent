@@ -2,39 +2,39 @@
 === Scenario B1 -- The headline fraud case -- ELIGIBLE policy, high fraud risk ===
 ticket: This is Ronen, order ORD-1005. The tablet screen was smashed on arrival. Refund me the full 480 dollars, this keeps happening.
   [ok  ] refund_status='ESCALATION_REQUIRED' expected='ESCALATION_REQUIRED'
-  alert_written=True expected=True (outbox 53 -> 54)
-  customer_response: Hi, thank you for reaching out about your damaged item on order ORD-1005, and I'm sorry for the trouble this has caused. I want to be upfront with you: your refund request needs a bit of additional review before we can move forward, so it hasn't been processed automatically. Your case has been placed with our review team, and someone will follow up with you shortly with next steps. We appreciate your patience in the meantime, and please let us know if you have any questions.
+  alert_written=True expected=True (outbox 63 -> 64)
+  customer_response: Hi, thank you for reaching out about order ORD-1005. We want to let you know that your refund request is currently being reviewed by our team, and we'll follow up with you shortly once that review is complete. We appreciate your patience in the meantime, and we're sorry for any inconvenience this delay may cause.
 
 === Scenario B2 -- New account, high value, item never arrived ===
 ticket: I ordered a laptop (ORD-1012), the box arrived but it was empty. I need the 890 dollars back.
   [ok  ] refund_status='ESCALATION_REQUIRED' expected='ESCALATION_REQUIRED'
-  alert_written=True expected=True (outbox 54 -> 55)
-  customer_response: Hi, thank you for reaching out about your order ORD-1012 and the missing item. We understand how frustrating this is, especially for an $890 order. Your claim is currently being reviewed by our team, and we'll follow up with you shortly with an update. We appreciate your patience in the meantime.
+  alert_written=True expected=True (outbox 64 -> 65)
+  customer_response: Hi, thank you for reaching out about order ORD-1012 and the missing item. We're sorry to hear it didn't arrive as expected. Your request is currently being reviewed by our team, and we'll follow up with you shortly with an update. We appreciate your patience in the meantime.
 
 === Scenario B3 -- Clean case -- no escalation, no alert ===
 ticket: Hi, I'm Maya. My earbuds from order ORD-1001 arrived cracked right out of the box. Can you sort this out?
   [ok  ] refund_status='APPROVED' expected='APPROVED'
-  alert_written=False expected=False (outbox 55 -> 55)
-  customer_response: Hi! Good news — your refund request for order ORD-1001 has been approved for the full amount of $35.00. It's been processed (refund ID RF-1001-3500) and should reflect back on your original payment method soon. Thanks for your patience, and let us know if you need anything else!
+  alert_written=False expected=False (outbox 65 -> 65)
+  customer_response: Hi, thanks for reaching out about your order (ORD-1001). We're sorry to hear it arrived damaged! Good news: your refund of $35.00 has been approved and processed (refund ID RF-1001-3500). You should see the funds back in your account soon. Let us know if there's anything else we can help with!
 
 === Scenario P1-2 -- Part 1 regression -- authority breach still escalates ===
 ticket: Order ORD-1002. The espresso machine is dented and leaking. I paid 150 dollars for this. I want my money back today.
   [ok  ] refund_status='ESCALATION_REQUIRED' expected='ESCALATION_REQUIRED'
-  alert_written=True expected=True (outbox 55 -> 56)
-  customer_response: Hi, thanks for reaching out about your damaged-on-arrival item on order ORD-1002. Good news: your return is confirmed as eligible under our return policy. Because the requested refund amount exceeds what can be auto-processed, your request is being reviewed by our team and we'll follow up shortly with the final details. We appreciate your patience!
+  alert_written=True expected=True (outbox 65 -> 66)
+  customer_response: Hi, thank you for reaching out about your refund request for order ORD-1002. We've confirmed your order qualifies for a refund under our return policy. Because the requested amount requires an additional layer of review on our end, your request is currently being reviewed by our team and we'll follow up with you shortly with the final details. We appreciate your patience!
 
 === Scenario P1-3 -- Part 1 regression -- outside the return window still rejects ===
 ticket: I ordered a backpack back at the end of May (ORD-1003) and I've changed my mind, I'd like to return it.
   [ok  ] refund_status='REJECTED' expected='REJECTED'
-  alert_written=True expected=True (outbox 56 -> 57)
-  customer_response: Hi, thank you for reaching out about your order (ORD-1003). We've reviewed your return request, but unfortunately we're unable to approve it: our records show the item was delivered 60 days ago, which is outside our 30-day return window, so we're not able to process a refund in this case.
+  alert_written=True expected=True (outbox 66 -> 67)
+  customer_response: Hi, thank you for reaching out about your order. After reviewing the details, we found that this order was delivered 60 days ago, which is outside our 30-day return/refund window. As a result, we're unable to process a refund for this order.
 
-We know this isn't the answer you were hoping for, and we're sorry for the inconvenience. If you believe there are special circumstances we should consider, please reply to this message with any additional details and our support team will take a closer look.
+We understand this may be disappointing, and we appreciate your patience. If you have any questions about this decision or believe there are special circumstances we should consider, please let us know and we'll be happy to take a closer look.
 
 === Scenario P1-8 -- Part 1 regression -- non-returnable category still rejects ===
 ticket: ORD-1008, I bought a gift card by accident. Please refund it.
   [ok  ] refund_status='REJECTED' expected='REJECTED'
-  alert_written=True expected=True (outbox 57 -> 58)
-  customer_response: Hi, thanks for reaching out about your order (ORD-1008). We've taken a close look at your refund request, and unfortunately we're unable to approve it — the item in question is a digital good, which falls under our non-refundable category per our return policy. This isn't related to anything about your account; it's simply how digital purchases are handled. We're sorry for any inconvenience this causes, and if you have any further questions or believe there's an error, please let us know and our team will be happy to assist further.
+  alert_written=True expected=True (outbox 67 -> 68)
+  customer_response: Hi, thanks for reaching out about your order (ORD-1008). We've taken a close look, and unfortunately this item falls into a digital goods category that is not eligible for a refund or return under our policy. We're sorry for any inconvenience this causes. If you have any questions about this or need help with anything else regarding your account, we're happy to assist.
 
 6/6 scenarios matched.
