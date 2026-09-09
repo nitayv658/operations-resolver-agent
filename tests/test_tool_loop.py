@@ -360,6 +360,55 @@ def test_run_tool_loop_when_max_iterations_reached_should_log_warning(tool_schem
     assert any(r.getMessage() == "tool_loop.max_iterations_reached" for r in caplog.records)
 
 
+def test_run_tool_loop_when_model_stops_without_tool_call_should_log_the_text(
+    tool_schemas, tool_registry, caplog
+):
+    """A turn that ends in plain text instead of a tool call is otherwise a
+    silent dead end -- the caller only ever learns stopped_reason='stop',
+    with no way to see what the model actually said. This is the exact
+    failure mode observed live on the Part 2 crew's Decision agent, where
+    it was undiagnosable after the fact for lack of exactly this log line.
+    """
+    with caplog.at_level(logging.WARNING, logger="resolver_agent.tool_loop"):
+        result = _run(
+            [
+                ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+                ScriptedResponse([text_block("I don't have enough information to proceed.")], stop_reason="end_turn"),
+            ],
+            tool_schemas,
+            tool_registry,
+        )
+
+    assert result.stopped_reason == "stop"
+    records = [r for r in caplog.records if r.getMessage() == "tool_loop.stopped_without_tool_call"]
+    assert len(records) == 1
+    assert records[0].fields["api_stop_reason"] == "end_turn"
+    assert records[0].fields["text"] == "I don't have enough information to proceed."
+
+
+def test_run_tool_loop_when_forced_final_call_produces_no_stop_tool_should_log_the_text(
+    tool_schemas, tool_registry, caplog
+):
+    with caplog.at_level(logging.WARNING, logger="resolver_agent.tool_loop"):
+        result = _run(
+            [
+                ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+                ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1002"})]),
+                # forced call (tool_choice pinned to the stop tool): model still doesn't comply
+                ScriptedResponse([text_block("I'm not sure what to do.")], stop_reason="end_turn"),
+            ],
+            tool_schemas,
+            tool_registry,
+            max_iterations=2,
+        )
+
+    assert result.stopped_reason == "max_iterations"
+    records = [r for r in caplog.records if r.getMessage() == "tool_loop.forced_call_did_not_call_stop_tool"]
+    assert len(records) == 1
+    assert records[0].fields["api_stop_reason"] == "end_turn"
+    assert records[0].fields["text"] == "I'm not sure what to do."
+
+
 def test_run_tool_loop_when_log_context_given_should_be_merged_into_every_record(
     tool_schemas, tool_registry, caplog
 ):

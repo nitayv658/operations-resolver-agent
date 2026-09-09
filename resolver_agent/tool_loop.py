@@ -86,6 +86,19 @@ def _stringify(result: Any) -> str:
         return str(result)
 
 
+def _text_of(response: Any) -> Optional[str]:
+    """Concatenate a response's text blocks, if any.
+
+    Used only for logging a turn that didn't produce the tool call the
+    caller was waiting for -- that text is otherwise discarded entirely
+    (the caller only ever sees ``stopped_reason='stop'`` or
+    ``'max_iterations'``), which makes this exact failure mode
+    undebuggable from production logs alone.
+    """
+    parts = [block.text for block in response.content if getattr(block, "type", None) == "text"]
+    return "".join(parts) if parts else None
+
+
 def _create(client: "anthropic.Anthropic", tool_calls_so_far: List[ToolCallRecord], **kwargs: Any) -> Any:
     try:
         return client.messages.create(**kwargs)
@@ -194,6 +207,14 @@ def run_tool_loop(
         )
 
         if response.stop_reason != "tool_use":
+            log_event(
+                _logger,
+                logging.WARNING,
+                "tool_loop.stopped_without_tool_call",
+                api_stop_reason=response.stop_reason,
+                text=_text_of(response),
+                **ctx,
+            )
             return ToolLoopResult(response, messages, tool_calls, "stop")
 
         messages.append({"role": "assistant", "content": response.content})
@@ -285,8 +306,19 @@ def run_tool_loop(
             **extra_kwargs,
         )
         messages.append({"role": "assistant", "content": response.content})
+        made_stop_call = False
         for block in response.content:
             if block.type == "tool_use" and block.name == stop_tool_name:
                 tool_calls.append(ToolCallRecord(block.name, block.input, None))
+                made_stop_call = True
+        if not made_stop_call:
+            log_event(
+                _logger,
+                logging.WARNING,
+                "tool_loop.forced_call_did_not_call_stop_tool",
+                api_stop_reason=response.stop_reason,
+                text=_text_of(response),
+                **ctx,
+            )
 
     return ToolLoopResult(response, messages, tool_calls, "max_iterations")
