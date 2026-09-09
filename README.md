@@ -455,9 +455,9 @@ scenarios plus a Part 1 regression spot-check, the same role
 
 ### Testing this design
 
-`tests/crew/` (21 tests) follows the same split Part 1 uses: a scripted
+`tests/crew/` (26 tests) follows the same split Part 1 uses: a scripted
 fake model drives each agent and the orchestrator through the real
-starter-kit tools, so the whole suite — 128 tests total across both parts —
+starter-kit tools, so the whole suite — 136 tests total across both parts —
 runs deterministically with no API key. `tests/crew/test_tool_ownership.py`
 specifically asserts each agent's registry only contains the tool names
 `TOOL_OWNERSHIP` assigns it, so the authority-separation guarantee above is
