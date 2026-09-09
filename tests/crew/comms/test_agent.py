@@ -6,7 +6,7 @@ boundary, not trusted to the prompt alone."""
 
 from __future__ import annotations
 
-from resolver_agent.crew.comms.agent import CommsAgent
+from resolver_agent.crew.comms.agent import CommsAgent, _safe_customer_response
 from resolver_agent.crew.comms.output_tool import SUBMIT_COMMS_RESULT_TOOL_NAME
 from resolver_agent.crew.schemas import Decision, RiskReport
 
@@ -162,3 +162,83 @@ def test_run_sends_a_real_alert_when_escalation_is_required():
     # never leaks the fraud flag to the customer
     lowered = result.customer_response.lower()
     assert "fraud" not in lowered and "risk" not in lowered
+
+
+def test_customer_response_citing_a_stale_pre_correction_amount_is_replaced():
+    """Live behavior this reproduces: the Decision agent's own rationale
+    described an earlier process_refund attempt at the auto-refund cap
+    ($50) before the case was escalated to $150 -- the guardrail in
+    decision/output_tool.py already nulls approved_amount/refund_id, but
+    never touches rationale, so a smaller model can (and did, live) repeat
+    the stale $50/refund_id straight from it. A prompt instruction alone
+    did not stop this reliably -- this is the deterministic backstop."""
+    decision = _decision(
+        refund_status="ESCALATION_REQUIRED",
+        approved_amount=None,
+        refund_id=None,
+        requested_amount=150.0,
+        rationale=(
+            "process_refund returned status APPROVED, approved_amount 50.00, "
+            "refund_id RF-1002-5000, within the automatic refund authority. "
+            "The remaining 100.00 USD is outside my automatic authority."
+        ),
+    )
+    client = ScriptedClient(
+        [
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        "get_escalation_route",
+                        {"risk_band": "low", "requested_amount": 150.0, "prior_fraud_flags": 0, "order_status": "delivered", "verdict": "ELIGIBLE"},
+                    )
+                ]
+            ),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        "send_slack_alert",
+                        {"channel_id": "CH-TIER2", "severity": "medium", "payload": {"order_id": "ORD-1001"}},
+                    )
+                ]
+            ),
+            _submit_reply(
+                "We've processed an initial refund of $50.00 (Refund ID: RF-1002-5000). "
+                "The remaining $100.00 is under review."
+            ),
+        ]
+    )
+    agent = CommsAgent(client=client, model="x")
+
+    result = agent.run(decision, case_id="c4")
+
+    assert "50" not in result.customer_response
+    assert "RF-1002-5000" not in result.customer_response
+    assert result.customer_response == _safe_customer_response("ESCALATION_REQUIRED")
+    assert len(result.corrections) == 1
+    assert "stale" in result.warnings[0].lower() or "RF-1002-5000" in result.warnings[0]
+
+
+def test_customer_response_citing_the_real_requested_and_approved_amounts_is_kept():
+    """The guardrail must not be trigger-happy: citing the decision's own
+    vetted requested_amount/approved_amount is exactly the normal, wanted
+    case and must pass through unchanged."""
+    decision = _decision(refund_status="APPROVED", approved_amount=35.0, refund_id="RF-1001-3500", requested_amount=35.0)
+    client = ScriptedClient(
+        [
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        "get_escalation_route",
+                        {"risk_band": "low", "requested_amount": 35.0, "prior_fraud_flags": 0, "order_status": "delivered", "verdict": "ELIGIBLE"},
+                    )
+                ]
+            ),
+            _submit_reply("Your refund of $35.00 (Refund ID: RF-1001-3500) has been approved."),
+        ]
+    )
+    agent = CommsAgent(client=client, model="x")
+
+    result = agent.run(decision, case_id="c5")
+
+    assert result.customer_response == "Your refund of $35.00 (Refund ID: RF-1001-3500) has been approved."
+    assert result.corrections == []

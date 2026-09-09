@@ -229,6 +229,8 @@ class OperationsCrew:
                 f"Escalation route: escalation_required={comms_result.escalation.get('escalation_required')}, "
                 f"channel={comms_result.escalation.get('channel')}."
             )
+        reasoning.extend(comms_result.warnings)
+        reasoning.extend(f"[corrected] {c}" for c in comms_result.corrections)
         reasoning.append(f"Alert sent: {comms_result.alert_sent}.")
 
         log_event(
