@@ -270,12 +270,17 @@ without your own API key.
 
 ## Part 2 — Distributed Agent Crew
 
+> 📓 [`crew_demo.ipynb`](crew_demo.ipynb) — a runnable walkthrough against
+> the live API and real starter-kit tools (a clean case, the `ORD-1005`
+> fraud override, a live proof that authority separation is physical, the
+> full 6-scenario regression suite, and a guardrail spotlight against
+> `comms/output_tool.py`'s deterministic checks), with real, saved outputs
+> — the Part 2 equivalent of [`demo.ipynb`](demo.ipynb).
+>
 > 📄 [`docs/evidence/`](docs/evidence/) — a real, saved transcript of
-> `scripts/run_crew_scenarios.py` against the live API (stdout + structured JSON
-> logs, 6/6 scenarios matched), so the crew's real tool-calling behavior
-> below is backed by an actual run, not just this section's description of
-> one. (There's no `demo.ipynb`-style notebook for the crew yet — this is
-> the Part 2 equivalent for now.)
+> `scripts/run_crew_scenarios.py` against the live API (stdout + structured
+> JSON logs, 6/6 scenarios matched), so the crew's real tool-calling
+> behavior below is backed by an actual run even without your own API key.
 
 Part 2 turns the single `ResolverAgent` into a three-agent pipeline —
 **Researcher → Decision → Comms** — each with a narrower job, a narrower
