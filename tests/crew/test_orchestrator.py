@@ -349,7 +349,7 @@ def test_model_kwarg_alone_applies_to_researcher_and_decision_but_not_comms():
 
 def test_per_agent_env_vars_apply_when_no_kwarg_is_passed(monkeypatch):
     """The middle tier of the resolution order (kwarg -> env var -> default)
-    -- run_crew.py/run_crew_scenarios.py both construct OperationsCrew()
+    -- scripts/run_crew.py/scripts/run_crew_scenarios.py both construct OperationsCrew()
     with no per-agent kwargs at all, so this env-var path is the only way
     either entry point can actually reach it."""
     monkeypatch.setenv("ANTHROPIC_MODEL_RESEARCHER", "researcher-from-env")
@@ -364,7 +364,7 @@ def test_per_agent_env_vars_apply_when_no_kwarg_is_passed(monkeypatch):
 
 
 def test_comms_defaults_to_haiku_with_no_kwarg_model_or_env_var(monkeypatch):
-    """The actual default path run_crew.py/run_crew_scenarios.py take: no
+    """The actual default path scripts/run_crew.py/scripts/run_crew_scenarios.py take: no
     per-agent kwargs, no env vars set at all -- Comms should land on
     DEFAULT_COMMS_MODEL (Haiku), not DEFAULT_MODEL (Sonnet), while
     Researcher/Decision stay on DEFAULT_MODEL."""

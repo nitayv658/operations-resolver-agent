@@ -2,10 +2,10 @@
 """Aggregate resolver_agent's structured JSON logs into a plain-text summary.
 
 Usage:
-    python3 summarize_logs.py path/to/log.jsonl
-    python3 summarize_logs.py -                          # read stdin explicitly
-    python3 run_ticket.py "..." 2> run.log && python3 summarize_logs.py run.log
-    LOG_LEVEL=INFO python3 run_scenarios.py 2>&1 | python3 summarize_logs.py
+    python3 scripts/summarize_logs.py path/to/log.jsonl
+    python3 scripts/summarize_logs.py -                          # read stdin explicitly
+    python3 scripts/run_ticket.py "..." 2> run.log && python3 scripts/summarize_logs.py run.log
+    LOG_LEVEL=INFO python3 scripts/run_scenarios.py 2>&1 | python3 scripts/summarize_logs.py
 
 No file path (or ``-``) reads from stdin. Non-JSON lines (e.g.
 run_scenarios.py's own "=== Scenario N ===" prose) are silently skipped, so
@@ -24,8 +24,11 @@ there (see issue #6). It's the "natural first step" toward that.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from resolver_agent.log_summary import format_summary, summarize
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # resolver_agent/ is one level up
+
+from resolver_agent.log_summary import format_summary, summarize  # noqa: E402
 
 
 def main() -> int:

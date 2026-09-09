@@ -3,24 +3,29 @@
 regression spot-check.
 
 Same relationship to starter-kit/examples/verify_scenarios.py as
-run_scenarios.py has for Part 1: that script checks the deterministic
+scripts/run_scenarios.py has for Part 1: that script checks the deterministic
 data/rule engines are self-consistent (run it first); this one checks
 whether the *crew* -- three real model calls per ticket -- reaches the
 right outcome, including whether an alert actually lands in the outbox
 exactly when (and only when) it should.
 
 Usage:
-    python3 run_crew_scenarios.py
+    python3 scripts/run_crew_scenarios.py
 """
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from resolver_agent.crew import OperationsCrew
-from resolver_agent.logging_utils import configure_logging
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # resolver_agent/ is one level up
 
-sys.path.insert(0, "starter-kit")
+from resolver_agent.crew import OperationsCrew  # noqa: E402
+from resolver_agent.logging_utils import configure_logging  # noqa: E402
+
+# starter-kit/ is already on sys.path as a side effect of importing
+# resolver_agent.crew above (see resolver_agent/agent.py) -- no separate
+# insert needed here.
 import multi_agent_tools as mat  # noqa: E402
 
 SCENARIOS = [

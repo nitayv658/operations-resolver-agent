@@ -121,7 +121,7 @@ Key facts, already true in the code -- don't re-derive them, use them:
   `get_logger()` / `log_event()` / `JsonFormatter`; every event is a dotted name (e.g.
   `"tool_loop.repeat_call_refused"`) plus structured fields, never interpolated into a message
   string. `configure_logging()` -- which attaches the actual stderr handler -- is called **only**
-  by entry points (`run_ticket.py`, `run_scenarios.py`), never by `resolver_agent` on import; that's
+  by entry points (`scripts/run_ticket.py`, `scripts/run_scenarios.py`), never by `resolver_agent` on import; that's
   what keeps the package embeddable (Part 2, or a test suite using `caplog`) without fighting over
   the root logger. Every log line from one `resolve()` call carries the same `_case_id` so
   concurrent or sequential cases don't tangle in the stream. Raw ticket text and
@@ -146,10 +146,10 @@ Key facts, already true in the code -- don't re-derive them, use them:
   |---|---|---|
   | `starter-kit/examples/verify_scenarios.py` | the fixed data/rule engine is internally consistent | No |
   | `pytest` (`tests/`) | `resolver_agent`'s own logic: loop mechanics, guardrails, output validation, via `ScriptedClient` (`tests/helpers.py`, which records `call_kwargs` per call so tests can assert on exactly what was sent to the API) | No |
-  | `run_scenarios.py` | the agent's actual judgment against all 9 brief scenarios | Yes |
+  | `scripts/run_scenarios.py` | the agent's actual judgment against all 9 brief scenarios | Yes |
   A change to `tool_loop.py` or `output_tool.py` should get a `pytest` test with a scripted fake
   model (cheap, deterministic). A change to `prompts.py` or tool descriptions is better checked
-  against `run_scenarios.py` since it's the model's judgment being changed, not mechanics.
+  against `scripts/run_scenarios.py` since it's the model's judgment being changed, not mechanics.
 
 If a question needs more than this summary, read the actual files -- they're all short and worth
 opening directly rather than guessing from this summary alone. `docs/quest-brief/` has the original
@@ -170,13 +170,13 @@ boundaries of a single-ticket resolver (Quest #4 Part 1), not oversights:
   need revisiting if `tool_loop.py` is reused for a Part 2 agent with larger tool payloads.
 - **No memory between tasks.** Each `resolve()` call builds a brand-new `messages` list and a fresh
   `_case_id`; nothing about one ticket carries into the next, even on the same `ResolverAgent`
-  instance (which *is* commonly reused across calls -- see `run_scenarios.py` -- but only for
+  instance (which *is* commonly reused across calls -- see `scripts/run_scenarios.py` -- but only for
   `client`/`tool_schemas`/`tool_registry`, never conversation state). Even the tools are stateless:
   `process_refund`'s own docstring says "nothing is written to disk" -- there's no history of prior
   tickets anywhere.
 - **No concurrency handling, though it's incidentally safe by inspection, not by design.** Nothing
-  in the repo runs concurrently today (`run_scenarios.py` loops sequentially, one process per
-  ticket in `run_ticket.py`). If you did call `resolve()` from multiple threads on the same
+  in the repo runs concurrently today (`scripts/run_scenarios.py` loops sequentially, one process per
+  ticket in `scripts/run_ticket.py`). If you did call `resolve()` from multiple threads on the same
   `ResolverAgent`: every call builds fully local state (`messages`, `case_id` -- `agent.py`), and
   `_authorize_tool_registry()` returns a **new** wrapped dict per call rather than mutating
   `self.tool_registry`, so two concurrent calls with different `requester_user_id`s don't leak
@@ -214,19 +214,19 @@ boundaries of a single-ticket resolver (Quest #4 Part 1), not oversights:
 - **Cost/runaway control is `max_iterations` + `max_tokens` only.** No cross-case token budget, no
   wall-clock timeout, no cost tracking. Hitting the cap doesn't hang -- it forces one last
   `submit_resolution` call, which is what actually bounds worst-case cost.
-- **Replay is partial.** Live model calls aren't reproducible (`run_scenarios.py` can vary run to
+- **Replay is partial.** Live model calls aren't reproducible (`scripts/run_scenarios.py` can vary run to
   run, by the README's own admission), but every real tool call + result is preserved in
   `_tool_calls`, so you can audit what the agent saw. Deterministic replay only exists for
   *mechanics* testing, via `ScriptedClient` faking the model's responses exactly.
 - **No aggregate success tracking, and no CI running any of the three test tiers** (confirmed: no
-  `.github/` or other CI config in the repo). `run_scenarios.py` is a manually-triggered,
+  `.github/` or other CI config in the repo). `scripts/run_scenarios.py` is a manually-triggered,
   point-in-time spot-check against 10 tickets covering the 9 brief scenarios -- its result isn't
   stored anywhere once the terminal closes, so there's no actual trend data, only whatever a human
   happens to remember across runs. Its pass condition is stricter than "got the right answer":
-  `decision == expected` **and** `_validation_warnings` is empty (`run_scenarios.py`'s own check).
+  `decision == expected` **and** `_validation_warnings` is empty (`scripts/run_scenarios.py`'s own check).
   That second half matters because `enforce_resolution()` auto-corrects a wrong decision before
   it's returned -- so a scenario the model judged wrong but the code silently fixed would show the
-  *correct* final decision, yet `run_scenarios.py` still counts it a failure, because it's
+  *correct* final decision, yet `scripts/run_scenarios.py` still counts it a failure, because it's
   deliberately measuring the model's raw judgment quality, not the corrected output. The structured
   log events already give the categorical material for a real over-time metric, unused today:
   `agent.case_resolved` (clean), `agent.resolution_corrected` (model was wrong, code fixed it),

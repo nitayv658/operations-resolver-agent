@@ -1,10 +1,10 @@
 """Tests for log_summary.summarize()/format_summary() -- the aggregation
-logic behind summarize_logs.py.
+logic behind scripts/summarize_logs.py.
 
 No I/O here: summarize() takes an iterable of lines (a real caller might
 hand it an open file, sys.stdin, or a plain list, all of which are
 interchangeable as an Iterable[str]) and returns a plain dataclass, so
-these tests just build lists of JSON strings directly. summarize_logs.py
+these tests just build lists of JSON strings directly. scripts/summarize_logs.py
 itself is a thin CLI wrapper around this and isn't separately tested here.
 """
 
@@ -62,7 +62,7 @@ def test_summarize_should_deduplicate_case_ids_within_the_same_event():
 
 
 def test_summarize_should_ignore_lines_that_are_not_valid_json():
-    # Real usage pipes combined stdout+stderr from run_scenarios.py, which
+    # Real usage pipes combined stdout+stderr from scripts/run_scenarios.py, which
     # includes plain-text "=== Scenario N ===" lines interleaved with JSON
     # log lines -- those must be silently skipped, not crash the summary.
     lines = [

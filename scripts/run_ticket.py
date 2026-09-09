@@ -2,10 +2,10 @@
 """Resolve one ad-hoc support ticket and pretty-print the structured result.
 
 Usage:
-    python3 run_ticket.py "Hi, I'm Maya. My earbuds from order ORD-1001 ..."
-    python3 run_ticket.py "..." USR-101   # bind to a requester identity --
-                                           # any record naming a different
-                                           # owner gets denied, not disclosed
+    python3 scripts/run_ticket.py "Hi, I'm Maya. My earbuds from order ORD-1001 ..."
+    python3 scripts/run_ticket.py "..." USR-101   # bind to a requester identity --
+                                                   # any record naming a different
+                                                   # owner gets denied, not disclosed
 
 Requires ANTHROPIC_API_KEY to be set (in the environment or in a .env file --
 see .env.example).
@@ -19,9 +19,12 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
-from resolver_agent import ResolverAgent
-from resolver_agent.logging_utils import configure_logging
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # resolver_agent/ is one level up
+
+from resolver_agent import ResolverAgent  # noqa: E402
+from resolver_agent.logging_utils import configure_logging  # noqa: E402
 
 
 def main() -> int:

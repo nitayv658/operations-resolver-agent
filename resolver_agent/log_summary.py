@@ -10,7 +10,7 @@ platform (CloudWatch/Datadog/ELK/etc.) and alerting there -- it just makes
 
 No I/O in this module: :func:`summarize` takes any ``Iterable[str]`` (a file,
 ``sys.stdin``, a plain list) and returns a plain dataclass, so it's testable
-without touching disk. ``summarize_logs.py`` at the repo root is the thin CLI
+without touching disk. ``scripts/summarize_logs.py`` is the thin CLI
 wrapper.
 """
 
@@ -51,7 +51,7 @@ def summarize(lines: Iterable[str]) -> LogSummary:
     A line that isn't valid JSON, or is valid JSON but has no ``event`` key
     (not one of our structured log lines), is silently skipped -- this is
     what lets a caller pipe combined stdout+stderr straight in (e.g.
-    ``run_scenarios.py``'s own prose output) without pre-filtering.
+    ``scripts/run_scenarios.py``'s own prose output) without pre-filtering.
     """
     total_lines = 0
     parsed_lines = 0

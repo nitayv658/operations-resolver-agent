@@ -5,7 +5,7 @@ the live Anthropic API — not just a README's description of what the agent
 does, but proof it actually happened, generated on a specific date and
 reviewable without needing your own API key.
 
-## Part 1 — Single-Agent Resolver (`run_scenarios.py`)
+## Part 1 — Single-Agent Resolver (`scripts/run_scenarios.py`)
 
 A mentor review of Part 1 (see the feedback attached to this submission)
 noted that everything about the agent's real, live tool-calling behavior was
@@ -14,7 +14,7 @@ backed only by documentation and by tests that *simulate* the model
 there was no saved proof of an actual run against the real Anthropic API.
 
 This directory closes that gap: a real, unedited output from
-`run_scenarios.py` against the live API, generated on 2026-08-27.
+`scripts/run_scenarios.py` against the live API, generated on 2026-08-27.
 
 - [`run_scenarios_live_output.txt`](run_scenarios_live_output.txt) — stdout:
   all 10 tickets (covering the 9 brief scenarios), each with the tools the
@@ -31,14 +31,14 @@ it's the under-request-to-dodge-escalation guardrail firing for real: the
 model requested exactly $50 (the cap) instead of the true $52 owed, and
 `enforce_resolution` caught and corrected it to `ESCALATION_REQUIRED` before
 it ever reached the customer (see the `validation warnings` line in the
-transcript). `run_scenarios.py`'s pass condition deliberately requires zero
+transcript). `scripts/run_scenarios.py`'s pass condition deliberately requires zero
 validation warnings — it measures the model's raw judgment, not the
 corrected final output — so this scenario counts as "not clean" even though
 the customer never saw a wrong answer. This is the same behavior already
 documented in the top-level README's guardrail section, now with a real
 transcript proving it actually happens.
 
-## Part 2 — Distributed Agent Crew (`run_crew_scenarios.py`)
+## Part 2 — Distributed Agent Crew (`scripts/run_crew_scenarios.py`)
 
 - [`run_crew_scenarios_live_output.txt`](run_crew_scenarios_live_output.txt) —
   stdout: all 6 scenarios (the Stage 2 headline fraud/clean cases plus a
@@ -52,7 +52,7 @@ transcript proving it actually happens.
   with the transcript above.
 
 **Result: 6/6 scenarios matched, generated 2026-09-09.** Pass criteria
-(exactly what `run_crew_scenarios.py` checks): the crew's final
+(exactly what `scripts/run_crew_scenarios.py` checks): the crew's final
 `refund_status` equals the scenario's expected value, *and* an alert lands
 in `starter-kit/outbox/alerts.jsonl` exactly when — and only when —
 expected.
@@ -70,7 +70,7 @@ expected.
 
 ### The two guardrails caught firing for real in this run
 
-Both are documented as design decisions in the top-level [README](../../README.md#part-2--distributed-agent-crew); this run shows each actually firing, not just being reasoned about — visible in the JSONL, not the stdout transcript, since `run_crew_scenarios.py` only prints the final `refund_status` and reply.
+Both are documented as design decisions in the top-level [README](../../README.md#part-2--distributed-agent-crew); this run shows each actually firing, not just being reasoned about — visible in the JSONL, not the stdout transcript, since `scripts/run_crew_scenarios.py` only prints the final `refund_status` and reply.
 
 - **P1-2** (`case_id=18177edb`): the Decision agent called `process_refund`
   for exactly `$50.00` — the auto-refund cap — instead of the real `$150.00`
@@ -93,6 +93,6 @@ To reproduce:
 ```bash
 python3 starter-kit/examples/verify_scenarios.py   # data/rule engine sanity check, no API key needed
 pytest tests/                                       # this package's own logic, scripted, no API key needed
-LOG_LEVEL=INFO python3 run_scenarios.py > out.txt 2> logs.jsonl        # Part 1, needs ANTHROPIC_API_KEY
-LOG_LEVEL=INFO python3 run_crew_scenarios.py > out.txt 2> logs.jsonl   # Part 2, needs ANTHROPIC_API_KEY
+LOG_LEVEL=INFO python3 scripts/run_scenarios.py > out.txt 2> logs.jsonl        # Part 1, needs ANTHROPIC_API_KEY
+LOG_LEVEL=INFO python3 scripts/run_crew_scenarios.py > out.txt 2> logs.jsonl   # Part 2, needs ANTHROPIC_API_KEY
 ```

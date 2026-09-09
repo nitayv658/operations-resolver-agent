@@ -400,7 +400,7 @@ def test_resolve_when_requester_user_id_does_not_match_order_owner_should_deny_a
 def test_resolve_when_requester_user_id_omitted_should_stay_unrestricted():
     # Regression: the default (no requester binding) must behave exactly as
     # it did before this change -- unrestricted access, every existing
-    # caller (run_scenarios.py, run_ticket.py, every other test in this
+    # caller (scripts/run_scenarios.py, scripts/run_ticket.py, every other test in this
     # suite) keeps working unchanged.
     client = ScriptedClient(
         [

@@ -254,14 +254,14 @@ There are three intentionally different tiers of verification:
 |---|---|---|
 | `starter-kit/examples/verify_scenarios.py` | The data/rule engine (`mock_services.py`, untouched) is internally consistent | No |
 | `pytest` (`tests/`) | `resolver_agent`'s own logic — loop mechanics, guardrails, output validation — driven with a scripted fake model, dispatched through the real starter-kit tools | No |
-| `run_scenarios.py` | The *agent's* judgment end to end, against a live model, across all 9 brief scenarios | Yes |
+| `scripts/run_scenarios.py` | The *agent's* judgment end to end, against a live model, across all 9 brief scenarios | Yes |
 
 The split matters: the first tests whether the fixtures and rules are
 consistent, the second tests this package's own code paths deterministically,
 and only the third tests whether the model actually reasons its way to the
 right outcome — which is the one that can vary run to run.
 
-**A real `run_scenarios.py` transcript is saved in [`docs/evidence/`](docs/evidence/)** —
+**A real `scripts/run_scenarios.py` transcript is saved in [`docs/evidence/`](docs/evidence/)** —
 stdout and structured logs from an actual run against the live API, not just
 this README's description of one, so the third tier's claims hold up even
 without your own API key.
@@ -271,7 +271,7 @@ without your own API key.
 ## Part 2 — Distributed Agent Crew
 
 > 📄 [`docs/evidence/`](docs/evidence/) — a real, saved transcript of
-> `run_crew_scenarios.py` against the live API (stdout + structured JSON
+> `scripts/run_crew_scenarios.py` against the live API (stdout + structured JSON
 > logs, 6/6 scenarios matched), so the crew's real tool-calling behavior
 > below is backed by an actual run, not just this section's description of
 > one. (There's no `demo.ipynb`-style notebook for the crew yet — this is
@@ -311,7 +311,7 @@ JSON, so the model downstream reads real structured data rather than a
 paraphrase of what the previous model said.
 
 ```
-                         run_crew.py / run_crew_scenarios.py
+             scripts/run_crew.py / scripts/run_crew_scenarios.py
                                        │  ticket_text
                                        ▼
               ┌─────────────────────────────────────────────────┐
@@ -448,15 +448,15 @@ one stage later.
 ### Running it
 
 ```
-python3 run_crew.py "This is Ronen, order ORD-1005. The tablet screen ..."
+python3 scripts/run_crew.py "This is Ronen, order ORD-1005. The tablet screen ..."
 ```
 
 prints the resulting `CrewResult` as JSON (requires `ANTHROPIC_API_KEY`; set
 `SLACK_WEBHOOK_URL` to also POST any alert to a real Slack incoming
 webhook, otherwise it's written to `starter-kit/outbox/alerts.jsonl`).
-`run_crew_scenarios.py` runs the crew against the Stage 2 brief's headline
-scenarios plus a Part 1 regression spot-check, the same role
-`run_scenarios.py` plays for Part 1.
+`scripts/run_crew_scenarios.py` runs the crew against the Stage 2 brief's
+headline scenarios plus a Part 1 regression spot-check, the same role
+`scripts/run_scenarios.py` plays for Part 1.
 
 ### Choosing a model per agent
 
@@ -464,8 +464,8 @@ scenarios plus a Part 1 regression spot-check, the same role
 before. Each agent's model can also be set independently —
 `researcher_model` / `decision_model` / `comms_model` kwargs, or the
 matching `ANTHROPIC_MODEL_RESEARCHER` / `ANTHROPIC_MODEL_DECISION` /
-`ANTHROPIC_MODEL_COMMS` env vars (see `.env.example`) for `run_crew.py` and
-`run_crew_scenarios.py`, which construct `OperationsCrew()` with no kwargs
+`ANTHROPIC_MODEL_COMMS` env vars (see `.env.example`) for `scripts/run_crew.py`
+and `scripts/run_crew_scenarios.py`, which construct `OperationsCrew()` with no kwargs
 at all.
 
 Comms is the one exception: it is **not** chained to the shared `model` —
@@ -507,7 +507,7 @@ specifically asserts each agent's registry only contains the tool names
 `TOOL_OWNERSHIP` assigns it, so the authority-separation guarantee above is
 checked in CI, not just true by construction today.
 
-**A real `run_crew_scenarios.py` transcript is saved in
+**A real `scripts/run_crew_scenarios.py` transcript is saved in
 [`docs/evidence/`](docs/evidence/)** — stdout and structured logs from an
 actual run against the live API, not just this README's description of one,
 so the crew's real tool-calling behavior and its corrections (`decision.corrected`
