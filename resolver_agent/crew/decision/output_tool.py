@@ -160,44 +160,6 @@ def _find_issues(
                         override_refund_id=last_refund.get("refund_id"),
                     )
                 )
-
-            # The same trap resolver_agent.output_tool guards against: an
-            # agent that requests exactly the cap instead of the real amount
-            # owed gets a clean APPROVED back (process_refund enforces its
-            # cap, not intent), which can't be told apart from an honest
-            # claim that happens to equal the cap without an independent
-            # ground truth for the real amount owed. The Decision agent has
-            # no get_order_details tool of its own, but risk_report.evidence
-            # (passed through from the Researcher in full) carries
-            # order_total_usd -- exactly the ground truth this check needs.
-            requested = last_refund.get("requested_amount")
-            cap = last_refund.get("auto_refund_cap_usd")
-            order_total = risk_report.evidence.get("order_total_usd")
-            if (
-                requested is not None
-                and cap is not None
-                and order_total is not None
-                and requested < order_total
-                and requested == cap
-            ):
-                findings.append(
-                    _Finding(
-                        f"process_refund was called with amount={requested} == the auto-refund cap "
-                        f"({cap}), below the real order total from the risk report "
-                        f"({order_total}) -- looks like an under-request to dodge escalation, "
-                        "instead of requesting the true amount owed.",
-                        override_status="ESCALATION_REQUIRED",
-                        override_approved_amount=None,
-                        override_refund_id=None,
-                        # Also correct requested_amount to the real amount owed --
-                        # Comms routes off this field (get_escalation_route's
-                        # requested_amount param), and leaving it at the
-                        # under-requested figure would make a $150 claim look
-                        # like a harmless $50 one to Agent 3, silently
-                        # defeating the very override this finding just made.
-                        override_requested_amount=order_total,
-                    )
-                )
     elif status == "APPROVED":
         findings.append(
             _Finding(
@@ -205,6 +167,54 @@ def _find_issues(
                 override_status="ESCALATION_REQUIRED",
                 override_approved_amount=None,
                 override_refund_id=None,
+            )
+        )
+
+    # --- requested_amount must reflect the real claim, not the cap ------- #
+    # The same trap resolver_agent.output_tool guards against: an agent
+    # that requests exactly the cap instead of the real amount owed can't
+    # be told apart from an honest claim that happens to equal the cap
+    # without an independent ground truth for the real amount owed.
+    # risk_report.evidence.order_total_usd (passed through from the
+    # Researcher) is that ground truth. Unconditional -- not nested under
+    # any particular tool_status/refund_status combination -- because the
+    # leak has been observed live in three different shapes that no single
+    # branch above catches on its own: requested_amount self-reported as
+    # the cap with process_refund never called at all; process_refund
+    # called with the capped amount and returning a wrong APPROVED (the
+    # original under-request-to-dodge-escalation trap, corrected above to
+    # ESCALATION_REQUIRED); and process_refund called with the capped
+    # amount but correctly returning ESCALATION_REQUIRED anyway (a
+    # blocks_automatic_refund case) -- refund_status ends up right by
+    # coincidence, but requested_amount still carries the wrong figure
+    # into Comms's alert payload. Only that last shape needs no status
+    # override; the first two do, since status must have come out
+    # 'APPROVED' for cap==requested<order_total to still be true here
+    # (a correctly-escalated case already has requested_amount corrected
+    # by the branches above, or never had this problem to begin with).
+    cap = last_refund.get("auto_refund_cap_usd") if last_refund is not None else None
+    if cap is None:
+        policy_calls = [c for c in tool_calls if c.name == "check_return_policy" and isinstance(c.result, dict)]
+        if policy_calls:
+            cap = policy_calls[-1].result.get("auto_refund_cap_usd")
+    requested = decision.get("requested_amount")
+    order_total = risk_report.evidence.get("order_total_usd")
+    if (
+        requested is not None
+        and cap is not None
+        and order_total is not None
+        and requested < order_total
+        and requested == cap
+    ):
+        findings.append(
+            _Finding(
+                f"requested_amount ({requested}) equals the auto-refund cap ({cap}) but is "
+                f"below the real order total from the risk report ({order_total}) -- looks "
+                "like the cap leaking into requested_amount instead of the real amount owed.",
+                override_status="ESCALATION_REQUIRED" if status == "APPROVED" else None,
+                override_approved_amount=(None if status == "APPROVED" else _UNSET),
+                override_refund_id=(None if status == "APPROVED" else _UNSET),
+                override_requested_amount=order_total,
             )
         )
 
@@ -255,5 +265,8 @@ def enforce_decision(
             if f.override_refund_id is not _UNSET and corrected.get("refund_id") != f.override_refund_id:
                 corrected["refund_id"] = f.override_refund_id
                 corrections.append(f"refund_id corrected to {f.override_refund_id!r}: {f.message}")
+            if f.override_requested_amount is not _UNSET and corrected.get("requested_amount") != f.override_requested_amount:
+                corrected["requested_amount"] = f.override_requested_amount
+                corrections.append(f"requested_amount corrected to {f.override_requested_amount!r}: {f.message}")
 
     return corrected, warnings, corrections
