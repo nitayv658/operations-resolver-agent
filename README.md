@@ -512,3 +512,16 @@ checked in CI, not just true by construction today.
 actual run against the live API, not just this README's description of one,
 so the crew's real tool-calling behavior and its corrections (`decision.corrected`
 firing for real on the `P1-2` case) hold up even without your own API key.
+
+---
+
+## A note on `.claude/`
+
+[`.claude/skills/senior-ai-engineer/SKILL.md`](.claude/skills/senior-ai-engineer/SKILL.md)
+is a Claude Code skill config — instructions that give an AI assistant
+grounded, file-and-line-level context about *this specific codebase* (its
+guardrails, its design philosophy, why `submit_resolution`/`submit_decision`
+exist as forced tool calls) rather than generic agent-framework advice. It's
+part of how this repository was built and iterated on, not part of the
+GlobalCart resolver agent itself — no runtime code imports or depends on it.
+Kept in the repo as an honest record of the development workflow.
