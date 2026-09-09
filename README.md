@@ -292,6 +292,93 @@ against the real tool result rather than trust it) is exactly what each
 stage needs too, just with a different bundle of tools and a different
 schema at the end of it.
 
+### End-to-end flow
+
+Every arrow between stages passes through `OperationsCrew.handle_ticket` —
+no agent calls another, and none of them share a conversation. Each stage
+opens a fresh message list holding only the upstream object serialized as
+JSON, so the model downstream reads real structured data rather than a
+paraphrase of what the previous model said.
+
+```
+                         run_crew.py / run_crew_scenarios.py
+                                       │  ticket_text
+                                       ▼
+              ┌─────────────────────────────────────────────────┐
+              │  OperationsCrew.handle_ticket   (orchestrator)  │
+              │  case_id = uuid4[:8]  ──> every log line        │
+              └─────────────────────────────────────────────────┘
+                                       │
+   ticket_text (raw str) ──────────────┘
+                                       ▼
+╔═══════════════════════════════════════════════════════════════════════╗
+║ AGENT 1  RESEARCHER          system: RESEARCHER_PROMPT                ║
+║ tools: get_order_details · get_user_profile · audit_fraud_risk        ║
+║ stop tool: submit_risk_report                                         ║
+║   _extract_report ─> validate_schema ─> enforce_risk_report           ║
+║        (drift vs. real audit_fraud_risk result is overwritten)        ║
+╚═══════════════════════════════════════════════════════════════════════╝
+                                       │  ResearcherResult
+                     ┌─────────────────┴─────────────────┐
+              report is None                      report is RiskReport
+                     │                                   │
+                     ▼                                   │
+        ┌────────────────────────────┐                   │
+        │ STOP: researcher_incomplete│                   │
+        │ generic reply, no retry    │                   │
+        └────────────────────────────┘                   │
+                                                         │
+        risk_report.model_dump_json()  ──────────────────┘
+                                       ▼
+╔═══════════════════════════════════════════════════════════════════════╗
+║ AGENT 2  DECISION            system: DECISION_PROMPT                  ║
+║ tools: check_return_policy · process_refund      <- only money holder ║
+║ stop tool: submit_decision                                            ║
+║   _extract_decision ─> validate_schema ─> enforce_decision            ║
+║        (refund_status cross-checked vs. process_refund + risk report) ║
+║   builds Decision, nesting the FULL RiskReport                        ║
+╚═══════════════════════════════════════════════════════════════════════╝
+                                       │  DecisionResult
+                     ┌─────────────────┴─────────────────┐
+             decision is None                     decision is Decision
+                     │                                   │
+                     ▼                                   │
+        ┌────────────────────────────┐                   │
+        │ STOP: decision_incomplete  │                   │
+        │ escalation reply, no retry │                   │
+        └────────────────────────────┘                   │
+                                                         │
+        decision.model_dump_json()  ─────────────────────┘
+                                       ▼
+╔═══════════════════════════════════════════════════════════════════════╗
+║ AGENT 3  COMMS               system: COMMS_PROMPT                     ║
+║ tools: get_escalation_route · send_slack_alert   <- no refund access  ║
+║ _guarded_registry: alert refused unless THIS case's route said        ║
+║                    escalation_required=true (fresh state per run)     ║
+║ stop tool: submit_comms_result  ──> customer_response only            ║
+║ escalation / alert_sent / alert_record read from real tool_calls      ║
+║ no submit? ──> canned reply keyed on refund_status, case still ends   ║
+╚═══════════════════════════════════════════════════════════════════════╝
+                                       │  CommsResult
+                                       ▼
+              ┌─────────────────────────────────────────────────┐
+              │ CrewResult                                      │
+              │ order_id · customer_response · decision         │
+              │ escalation · alert_sent · alert_record          │
+              │ reasoning_chain (all 3 stages) · stopped_reason │
+              └─────────────────────────────────────────────────┘
+```
+
+Two asymmetries are worth reading off the diagram. The Researcher and
+Decision stages each have a hard stop — a missing report or a missing
+decision ends the case with a safe reply, and the failing agent is never
+re-dispatched, since its own `max_iterations` already bounds a single
+stage's runaway. The Comms stage has no such stop: only its
+`customer_response` comes from the model, while `escalation`, `alert_sent`,
+and `alert_record` are read back out of the real `tool_calls` records, so a
+missing `submit_comms_result` degrades to a canned reply instead of failing
+the case.
+
 ### Why three agents, not one prompt with more tools
 
 Part 1's `submit_resolution` already showed that a single agent juggling
