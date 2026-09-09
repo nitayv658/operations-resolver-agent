@@ -100,3 +100,62 @@ def find_stale_refund_detail(customer_response: str, decision: Decision) -> Opti
             )
 
     return None
+
+
+# Matches "<refund/claim/request/payment> ... <is/was/has been/is being/will
+# be> ... <approved/processed/issued/credited/refunded/prepared/on its way>"
+# (noun before the outcome verb) and "we've/we have <outcome verb>" -- both
+# noun-first orderings a genuine completed-refund sentence actually takes.
+# Deliberately does NOT match the mirror-image ordering ("unable to process
+# a refund", "can't approve this claim"), where the outcome verb comes
+# before the noun -- that ordering is how the real rejection/escalation
+# wording in this crew's own scripted scenarios states a negative outcome,
+# so requiring noun-then-verb order already avoids most negation-related
+# false positives without needing to parse negation directly. The explicit
+# negation check below is a second layer, for phrasings that do happen to
+# fall in noun-then-verb order (e.g. "your refund has not been approved").
+_POSITIVE_OUTCOME_RE = re.compile(
+    r"\b(?:refund|claim|request|payment)\b[^.!?\n]{0,40}\b(?:has been|have been|is being|will be|is|was)\b"
+    r"[^.!?\n]{0,25}\b(?:approved|processed|issued|credited|refunded|prepared|on its way)\b"
+    r"|\bwe(?:'ve|\shave)\b[^.!?\n]{0,25}\b(?:approved|processed|issued|credited|refunded)\b",
+    re.IGNORECASE,
+)
+_NEGATION_RE = re.compile(
+    r"\b(?:not|cannot|can't|won't|unable|no longer|never|isn't|wasn't|hasn't|haven't|doesn't|didn't)\b",
+    re.IGNORECASE,
+)
+
+
+def find_premature_approval_language(customer_response: str, decision: Decision) -> Optional[str]:
+    """Catch a second, subtler shape of the same rule-5 leak
+    :func:`find_stale_refund_detail` targets: language describing the refund
+    as already approved, processed, issued, or imminent -- with no
+    mismatched number attached, so the amount/refund_id check above doesn't
+    fire -- on a case whose real ``decision.refund_status`` is not
+    ``APPROVED``. Observed live: Comms wrote "your claim is approved... your
+    refund of $150.00 is being prepared and will be processed shortly" for
+    an ``ESCALATION_REQUIRED`` decision, citing the correct $150 the whole
+    time -- the amount was never wrong, only the claim that it was already
+    being handled.
+
+    Only runs when ``decision.refund_status != "APPROVED"`` -- this exact
+    language is expected and correct on a genuinely approved case. Checked
+    sentence by sentence so a negation elsewhere in a long reply can't mask
+    a real violation, and skips a sentence containing an explicit negation
+    word (heuristic, not a full negation parse -- see the regex comment).
+    """
+    if decision.refund_status == "APPROVED":
+        return None
+
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", customer_response):
+        if not sentence.strip():
+            continue
+        if _POSITIVE_OUTCOME_RE.search(sentence) and not _NEGATION_RE.search(sentence):
+            return (
+                f"customer_response describes the refund as already approved/processed/issued "
+                f"in {sentence.strip()!r}, but decision.refund_status is "
+                f"{decision.refund_status!r}, not APPROVED -- no money should be described as "
+                "already handled or imminent."
+            )
+
+    return None

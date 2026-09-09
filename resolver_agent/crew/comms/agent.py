@@ -28,6 +28,7 @@ from ..schemas import Decision
 from .output_tool import (
     SUBMIT_COMMS_RESULT_SCHEMA,
     SUBMIT_COMMS_RESULT_TOOL_NAME,
+    find_premature_approval_language,
     find_stale_refund_detail,
     validate_schema,
 )
@@ -174,12 +175,20 @@ class CommsAgent:
             customer_response = _safe_customer_response(decision.refund_status)
         else:
             customer_response = raw["customer_response"]
-            stale_detail = find_stale_refund_detail(customer_response, decision)
-            if stale_detail is not None:
-                warnings.append(stale_detail)
-                log_event(_logger, logging.WARNING, "comms.customer_response_stale_refund_detail", detail=stale_detail, **ctx)
+            # Two independent, deterministic checks on the same underlying
+            # rule (never describe money as already handled beyond what the
+            # decision actually vetted) -- find_stale_refund_detail catches
+            # a mismatched number/refund_id, find_premature_approval_language
+            # catches approval-sounding language attached to a correct
+            # number (or no number at all). Either is grounds to fall back.
+            violation = find_stale_refund_detail(customer_response, decision) or find_premature_approval_language(
+                customer_response, decision
+            )
+            if violation is not None:
+                warnings.append(violation)
+                log_event(_logger, logging.WARNING, "comms.customer_response_overstated", detail=violation, **ctx)
                 customer_response = _safe_customer_response(decision.refund_status)
-                corrections.append(f"customer_response replaced with a safe generic reply: {stale_detail}")
+                corrections.append(f"customer_response replaced with a safe generic reply: {violation}")
 
         log_event(_logger, logging.INFO, "comms.result_produced", alert_sent=alert_sent, **ctx)
         return CommsResult(

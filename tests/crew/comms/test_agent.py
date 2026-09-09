@@ -242,3 +242,118 @@ def test_customer_response_citing_the_real_requested_and_approved_amounts_is_kep
 
     assert result.customer_response == "Your refund of $35.00 (Refund ID: RF-1001-3500) has been approved."
     assert result.corrections == []
+
+
+def test_customer_response_implying_approval_with_no_bad_number_is_still_replaced():
+    """The subtler leak the amount/refund_id check above can't see: no
+    mismatched figure at all -- the $150 cited is genuinely
+    decision.requested_amount -- but the wording still claims the refund is
+    already approved and being processed on an ESCALATION_REQUIRED case.
+    Live behavior this reproduces verbatim."""
+    decision = _decision(
+        refund_status="ESCALATION_REQUIRED",
+        approved_amount=None,
+        refund_id=None,
+        requested_amount=150.0,
+    )
+    client = ScriptedClient(
+        [
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        "get_escalation_route",
+                        {"risk_band": "low", "requested_amount": 150.0, "prior_fraud_flags": 0, "order_status": "delivered", "verdict": "ELIGIBLE"},
+                    )
+                ]
+            ),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        "send_slack_alert",
+                        {"channel_id": "CH-TIER2", "severity": "medium", "payload": {"order_id": "ORD-1001"}},
+                    )
+                ]
+            ),
+            _submit_reply(
+                "Thank you for reporting the damage. Your claim is approved under our return policy. "
+                "Your refund of $150.00 is being prepared and will be processed shortly."
+            ),
+        ]
+    )
+    agent = CommsAgent(client=client, model="x")
+
+    result = agent.run(decision, case_id="c6")
+
+    assert result.customer_response == _safe_customer_response("ESCALATION_REQUIRED")
+    assert len(result.corrections) == 1
+    assert "approved" in result.warnings[0].lower() or "processed" in result.warnings[0].lower()
+
+
+def test_legitimate_rejection_wording_is_not_falsely_flagged():
+    """The premature-approval check must not fire on the real, correct
+    rejection wording this crew's own scripted scenarios use -- 'unable to
+    process/approve' is an outcome-verb-before-noun phrasing (the opposite
+    order the check looks for), and is exactly what a REJECTED case should
+    say."""
+    decision = _decision(refund_status="REJECTED", approved_amount=None, refund_id=None, requested_amount=25.0)
+    client = ScriptedClient(
+        [
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        "get_escalation_route",
+                        {"risk_band": "low", "requested_amount": 25.0, "prior_fraud_flags": 0, "order_status": "delivered", "verdict": "REJECTED"},
+                    )
+                ]
+            ),
+            _submit_reply(
+                "Unfortunately, we're unable to process a refund for this order because it falls "
+                "under a non-returnable category. We're sorry for any inconvenience this causes."
+            ),
+        ]
+    )
+    agent = CommsAgent(client=client, model="x")
+
+    result = agent.run(decision, case_id="c7")
+
+    assert "unable to process a refund" in result.customer_response
+    assert result.corrections == []
+
+
+def test_escalation_wording_that_only_says_under_review_is_not_falsely_flagged():
+    """Ordinary, correct escalation wording -- 'currently being reviewed' --
+    must not trip the check; 'reviewed' is not one of the outcome verbs it
+    looks for."""
+    decision = _decision(
+        refund_status="ESCALATION_REQUIRED", approved_amount=None, refund_id=None, requested_amount=480.0
+    )
+    client = ScriptedClient(
+        [
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        "get_escalation_route",
+                        {"risk_band": "high", "requested_amount": 480.0, "prior_fraud_flags": 1, "order_status": "delivered", "verdict": "ELIGIBLE"},
+                    )
+                ]
+            ),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        "send_slack_alert",
+                        {"channel_id": "CH-FRAUD", "severity": "critical", "payload": {"order_id": "ORD-1001"}},
+                    )
+                ]
+            ),
+            _submit_reply(
+                "Thank you for reaching out. Your refund request is currently being reviewed by our "
+                "team, and we'll follow up with you shortly."
+            ),
+        ]
+    )
+    agent = CommsAgent(client=client, model="x")
+
+    result = agent.run(decision, case_id="c8")
+
+    assert "being reviewed" in result.customer_response
+    assert result.corrections == []
