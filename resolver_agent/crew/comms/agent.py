@@ -25,7 +25,13 @@ import multi_agent_tools as mat  # noqa: E402  (starter-kit/ is on sys.path -- s
 from ...logging_utils import get_logger, log_event
 from ...tool_loop import ModelAPIError, ToolCallRecord, run_tool_loop
 from ..schemas import Decision
-from .output_tool import SUBMIT_COMMS_RESULT_SCHEMA, SUBMIT_COMMS_RESULT_TOOL_NAME, validate_schema
+from .output_tool import (
+    SUBMIT_COMMS_RESULT_SCHEMA,
+    SUBMIT_COMMS_RESULT_TOOL_NAME,
+    find_premature_approval_language,
+    find_stale_refund_detail,
+    validate_schema,
+)
 from .prompts import COMMS_PROMPT
 
 _logger = get_logger(__name__)
@@ -96,6 +102,8 @@ class CommsResult:
     alert_record: Optional[Dict[str, Any]]
     tool_calls: List[ToolCallRecord] = field(default_factory=list)
     stopped_reason: str = "stop"
+    warnings: List[str] = field(default_factory=list)
+    corrections: List[str] = field(default_factory=list)
 
 
 class CommsAgent:
@@ -160,11 +168,27 @@ class CommsAgent:
 
         raw = self._extract_result(result.tool_calls)
         customer_response: str
+        warnings: List[str] = []
+        corrections: List[str] = []
         if raw is None or validate_schema(raw):
             log_event(_logger, logging.WARNING, "comms.fallback_customer_response", stopped_reason=result.stopped_reason, **ctx)
             customer_response = _safe_customer_response(decision.refund_status)
         else:
             customer_response = raw["customer_response"]
+            # Two independent, deterministic checks on the same underlying
+            # rule (never describe money as already handled beyond what the
+            # decision actually vetted) -- find_stale_refund_detail catches
+            # a mismatched number/refund_id, find_premature_approval_language
+            # catches approval-sounding language attached to a correct
+            # number (or no number at all). Either is grounds to fall back.
+            violation = find_stale_refund_detail(customer_response, decision) or find_premature_approval_language(
+                customer_response, decision
+            )
+            if violation is not None:
+                warnings.append(violation)
+                log_event(_logger, logging.WARNING, "comms.customer_response_overstated", detail=violation, **ctx)
+                customer_response = _safe_customer_response(decision.refund_status)
+                corrections.append(f"customer_response replaced with a safe generic reply: {violation}")
 
         log_event(_logger, logging.INFO, "comms.result_produced", alert_sent=alert_sent, **ctx)
         return CommsResult(
@@ -174,6 +198,8 @@ class CommsAgent:
             alert_record=alert_record,
             tool_calls=result.tool_calls,
             stopped_reason=result.stopped_reason,
+            warnings=warnings,
+            corrections=corrections,
         )
 
     @staticmethod

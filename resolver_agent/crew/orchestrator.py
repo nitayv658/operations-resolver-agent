@@ -19,6 +19,7 @@ run_tool_loop) already bounds a single stage's own runaway.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,6 +35,21 @@ from .researcher.agent import ResearcherAgent
 from .schemas import CrewResult, RiskReport
 
 _logger = get_logger(__name__)
+
+# Comms gets its own independent default, separate from the shared `model`
+# fallback Researcher/Decision still use -- templated, lower-stakes
+# escalation/customer messaging, and (as of this crew's own live testing)
+# now backstopped by the deterministic guardrails in comms/output_tool.py
+# (find_stale_refund_detail, find_premature_approval_language), which made
+# it safe to default this stage to a cheaper/faster model. Researcher and
+# Decision are not moved off DEFAULT_MODEL by default: live testing this
+# session found no evidence Opus outperforms Sonnet on the Decision task,
+# only a theoretical case based on it holding the only financial authority.
+# Not baked in via os.environ.get at import time (unlike DEFAULT_MODEL in
+# ..agent) -- ANTHROPIC_MODEL_COMMS is still read at __init__ time below, so
+# it stays overridable at runtime the same way ANTHROPIC_MODEL_RESEARCHER/
+# _DECISION already are.
+DEFAULT_COMMS_MODEL = "claude-haiku-4-5-20251001"
 
 
 def _lookup_failure_response(error: Optional[Dict[str, Any]]) -> str:
@@ -115,6 +131,9 @@ class OperationsCrew:
         self,
         client: Optional[anthropic.Anthropic] = None,
         model: str = DEFAULT_MODEL,
+        researcher_model: Optional[str] = None,
+        decision_model: Optional[str] = None,
+        comms_model: Optional[str] = None,
         max_iterations_per_agent: int = 6,
     ) -> None:
         if client is not None:
@@ -124,9 +143,19 @@ class OperationsCrew:
         else:
             self.client = anthropic.Anthropic()
         self.model = model
-        self.researcher = ResearcherAgent(self.client, self.model, max_iterations_per_agent)
-        self.decision_agent = DecisionAgent(self.client, self.model, max_iterations_per_agent)
-        self.comms_agent = CommsAgent(self.client, self.model, max_iterations_per_agent)
+        # Resolution order for Researcher/Decision: explicit kwarg, then its
+        # own env var, then the shared `model` (itself DEFAULT_MODEL unless
+        # overridden) -- so a caller passing only `model=` still gets it
+        # applied to both, unchanged. Comms is deliberately NOT chained to
+        # `model` -- its own default is DEFAULT_COMMS_MODEL (Haiku), so
+        # passing `model=` alone no longer moves Comms too; use comms_model=
+        # or ANTHROPIC_MODEL_COMMS to override it specifically.
+        self.researcher_model = researcher_model or os.environ.get("ANTHROPIC_MODEL_RESEARCHER") or model
+        self.decision_model = decision_model or os.environ.get("ANTHROPIC_MODEL_DECISION") or model
+        self.comms_model = comms_model or os.environ.get("ANTHROPIC_MODEL_COMMS") or DEFAULT_COMMS_MODEL
+        self.researcher = ResearcherAgent(self.client, self.researcher_model, max_iterations_per_agent)
+        self.decision_agent = DecisionAgent(self.client, self.decision_model, max_iterations_per_agent)
+        self.comms_agent = CommsAgent(self.client, self.comms_model, max_iterations_per_agent)
 
     def handle_ticket(self, ticket_text: str) -> CrewResult:
         case_id = uuid.uuid4().hex[:8]
@@ -218,6 +247,8 @@ class OperationsCrew:
                 f"Escalation route: escalation_required={comms_result.escalation.get('escalation_required')}, "
                 f"channel={comms_result.escalation.get('channel')}."
             )
+        reasoning.extend(comms_result.warnings)
+        reasoning.extend(f"[corrected] {c}" for c in comms_result.corrections)
         reasoning.append(f"Alert sent: {comms_result.alert_sent}.")
 
         log_event(
