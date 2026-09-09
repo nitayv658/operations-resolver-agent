@@ -455,3 +455,9 @@ runs deterministically with no API key. `tests/crew/test_tool_ownership.py`
 specifically asserts each agent's registry only contains the tool names
 `TOOL_OWNERSHIP` assigns it, so the authority-separation guarantee above is
 checked in CI, not just true by construction today.
+
+**A real `run_crew_scenarios.py` transcript is saved in
+[`docs/evidence/`](docs/evidence/)** — stdout and structured logs from an
+actual run against the live API, not just this README's description of one,
+so the crew's real tool-calling behavior and its corrections (`decision.corrected`
+firing for real on the `P1-2` case) hold up even without your own API key.
