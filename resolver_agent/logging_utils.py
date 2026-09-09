@@ -2,8 +2,8 @@
 
 resolver_agent only ever emits through named loggers (``resolver_agent.*``)
 -- it never calls ``logging.basicConfig()`` itself, and never attaches a
-handler on import. Only an application entry point (``run_ticket.py``,
-``run_scenarios.py``) calls :func:`configure_logging`. This is the normal
+handler on import. Only an application entry point (``scripts/run_ticket.py``,
+``scripts/run_scenarios.py``) calls :func:`configure_logging`. This is the normal
 library/application split: a library that grabs the root logger on import
 makes itself impossible to embed cleanly (e.g. inside Part 2's multi-agent
 system, or a test suite using ``caplog``).
@@ -62,9 +62,9 @@ def configure_logging(level: Optional[str] = None) -> None:
 
     Level resolution: the ``level`` argument, else the ``LOG_LEVEL`` env
     var, else ``WARNING`` -- quiet by default, so a normal successful run
-    of ``run_ticket.py`` prints nothing to stderr.
+    of ``scripts/run_ticket.py`` prints nothing to stderr.
 
-    stderr, not stdout: ``run_ticket.py`` prints the agent's JSON result to
+    stderr, not stdout: ``scripts/run_ticket.py`` prints the agent's JSON result to
     stdout as its actual output contract. Logs on stdout would interleave
     with and corrupt that.
     """

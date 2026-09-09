@@ -14,16 +14,19 @@ non-refundable statuses), so they're split into 5a/5b and 7a/7b here -- ten
 runs covering the same nine numbered scenarios.
 
 Usage:
-    python3 run_scenarios.py
+    python3 scripts/run_scenarios.py
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
-from resolver_agent import ResolverAgent
-from resolver_agent.logging_utils import configure_logging
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # resolver_agent/ is one level up
+
+from resolver_agent import ResolverAgent  # noqa: E402
+from resolver_agent.logging_utils import configure_logging  # noqa: E402
 
 SCENARIOS = [
     {

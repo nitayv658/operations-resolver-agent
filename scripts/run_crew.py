@@ -3,7 +3,7 @@
 pretty-print the result.
 
 Usage:
-    python3 run_crew.py "This is Ronen, order ORD-1005. The tablet screen ..."
+    python3 scripts/run_crew.py "This is Ronen, order ORD-1005. The tablet screen ..."
 
 Requires ANTHROPIC_API_KEY to be set (in the environment or in a .env file --
 see .env.example). Set SLACK_WEBHOOK_URL to also POST any alert to a real
@@ -19,9 +19,12 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
-from resolver_agent.crew import OperationsCrew
-from resolver_agent.logging_utils import configure_logging
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # resolver_agent/ is one level up
+
+from resolver_agent.crew import OperationsCrew  # noqa: E402
+from resolver_agent.logging_utils import configure_logging  # noqa: E402
 
 
 def main() -> int:
