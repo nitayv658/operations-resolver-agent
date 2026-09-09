@@ -460,32 +460,48 @@ scenarios plus a Part 1 regression spot-check, the same role
 
 ### Choosing a model per agent
 
-`OperationsCrew(model=...)` still sets one model for all three agents, as
-before. Each agent's model can now also be set independently —
+`OperationsCrew(model=...)` sets the model for Researcher and Decision, as
+before. Each agent's model can also be set independently —
 `researcher_model` / `decision_model` / `comms_model` kwargs, or the
 matching `ANTHROPIC_MODEL_RESEARCHER` / `ANTHROPIC_MODEL_DECISION` /
 `ANTHROPIC_MODEL_COMMS` env vars (see `.env.example`) for `run_crew.py` and
 `run_crew_scenarios.py`, which construct `OperationsCrew()` with no kwargs
-at all. Resolution order per agent: explicit kwarg, then that agent's own
-env var, then the shared `model` — so every existing caller that only
-passes `model=` keeps applying it to all three, unchanged.
+at all.
 
-The reason to split them: the three agents don't carry the same stakes.
-`DecisionAgent` is the only one with financial authority
-(`process_refund`) and the one whose ORD-1005-style fraud-override
-reasoning is worth a stronger model. `CommsAgent` is comparatively
-templated — escalation routing and the customer reply — and already
-guardrailed in code (`_guarded_registry`, `_safe_customer_response`), so a
-cheaper model is a reasonable place to economize. `ResearcherAgent` sits in
-between: its judgment (which fraud rules matter, whether `action_hint`
-reflects the tool's real output) feeds directly into Decision, so it isn't
-the place to cut first either.
+Comms is the one exception: it is **not** chained to the shared `model` —
+it defaults to `claude-haiku-4-5-20251001` (`DEFAULT_COMMS_MODEL` in
+`orchestrator.py`) even when `model=` is passed with nothing else, and only
+`comms_model=` / `ANTHROPIC_MODEL_COMMS` move it off that. Resolution order
+per agent: explicit kwarg, then that agent's own env var, then its default
+(the shared `model` for Researcher/Decision; a fixed Haiku default for
+Comms, independent of `model`).
+
+The reason to split them, and to split Comms off by default rather than
+just document it as an option: the three agents don't carry the same
+stakes, but live testing this session found the actual evidence doesn't
+split the way that story alone would suggest. `DecisionAgent` is the only
+one with financial authority (`process_refund`) and the one whose
+ORD-1005-style fraud-override reasoning would, in theory, benefit most from
+a stronger model — but repeated live runs against Opus vs. Sonnet on this
+same task showed no measurable difference in outcomes or in how often the
+code guardrail had to correct it, so Decision (and Researcher, whose
+judgment feeds directly into Decision) stay on `DEFAULT_MODEL` by default
+rather than guessing. `CommsAgent` is where live testing actually found
+something real: on Haiku, it twice repeated a stale, since-corrected refund
+figure from `decision.rationale` verbatim, and once described a refund as
+already approved on a case that wasn't — both real leaks, not
+hypothetical. Rather than pull Comms back to a stronger model to paper over
+that, the fix was to make the leak impossible in code
+(`find_stale_refund_detail` / `find_premature_approval_language` in
+`comms/output_tool.py`, deterministic checks with a safe generic fallback)
+— which is what actually makes it safe to default this templated,
+lower-stakes stage to the cheaper, faster model.
 
 ### Testing this design
 
-`tests/crew/` (30 tests) follows the same split Part 1 uses: a scripted
+`tests/crew/` (36 tests) follows the same split Part 1 uses: a scripted
 fake model drives each agent and the orchestrator through the real
-starter-kit tools, so the whole suite — 140 tests total across both parts —
+starter-kit tools, so the whole suite — 146 tests total across both parts —
 runs deterministically with no API key. `tests/crew/test_tool_ownership.py`
 specifically asserts each agent's registry only contains the tool names
 `TOOL_OWNERSHIP` assigns it, so the authority-separation guarantee above is

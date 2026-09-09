@@ -4,6 +4,7 @@ tool dispatch throughout."""
 
 from __future__ import annotations
 
+from resolver_agent.crew import orchestrator
 from resolver_agent.crew.comms.output_tool import SUBMIT_COMMS_RESULT_TOOL_NAME
 from resolver_agent.crew.decision.output_tool import SUBMIT_DECISION_TOOL_NAME
 from resolver_agent.crew.orchestrator import OperationsCrew
@@ -332,30 +333,51 @@ def test_per_agent_model_overrides_reach_their_own_agent_only():
     assert crew.comms_agent.model == "comms-model"
 
 
-def test_model_kwarg_alone_still_applies_to_all_three_agents():
-    """No per-agent overrides given -- `model=` remains the shared fallback
-    for all three, matching every existing call site/test in this file."""
+def test_model_kwarg_alone_applies_to_researcher_and_decision_but_not_comms():
+    """`model=` remains the shared fallback for Researcher/Decision, matching
+    every existing call site/test in this file -- but Comms is deliberately
+    NOT chained to it any more: it has its own independent default
+    (DEFAULT_COMMS_MODEL, Haiku), so passing `model=` alone no longer moves
+    Comms too."""
     crew = OperationsCrew(client=ScriptedClient([]), model="x")
 
     assert crew.researcher.model == "x"
     assert crew.decision_agent.model == "x"
-    assert crew.comms_agent.model == "x"
+    assert crew.comms_agent.model == orchestrator.DEFAULT_COMMS_MODEL
+    assert crew.comms_agent.model != "x"
 
 
 def test_per_agent_env_vars_apply_when_no_kwarg_is_passed(monkeypatch):
-    """The middle tier of the resolution order (kwarg -> env var -> shared
-    model) -- run_crew.py/run_crew_scenarios.py both construct
-    OperationsCrew() with no per-agent kwargs at all, so this env-var path
-    is the only way either entry point can actually reach it."""
+    """The middle tier of the resolution order (kwarg -> env var -> default)
+    -- run_crew.py/run_crew_scenarios.py both construct OperationsCrew()
+    with no per-agent kwargs at all, so this env-var path is the only way
+    either entry point can actually reach it."""
     monkeypatch.setenv("ANTHROPIC_MODEL_RESEARCHER", "researcher-from-env")
     monkeypatch.setenv("ANTHROPIC_MODEL_DECISION", "decision-from-env")
-    monkeypatch.delenv("ANTHROPIC_MODEL_COMMS", raising=False)  # left unset -- should fall through to `model`
+    monkeypatch.setenv("ANTHROPIC_MODEL_COMMS", "comms-from-env")
 
     crew = OperationsCrew(client=ScriptedClient([]), model="shared-default")
 
     assert crew.researcher.model == "researcher-from-env"
     assert crew.decision_agent.model == "decision-from-env"
-    assert crew.comms_agent.model == "shared-default"
+    assert crew.comms_agent.model == "comms-from-env"
+
+
+def test_comms_defaults_to_haiku_with_no_kwarg_model_or_env_var(monkeypatch):
+    """The actual default path run_crew.py/run_crew_scenarios.py take: no
+    per-agent kwargs, no env vars set at all -- Comms should land on
+    DEFAULT_COMMS_MODEL (Haiku), not DEFAULT_MODEL (Sonnet), while
+    Researcher/Decision stay on DEFAULT_MODEL."""
+    monkeypatch.delenv("ANTHROPIC_MODEL_RESEARCHER", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL_DECISION", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL_COMMS", raising=False)
+
+    crew = OperationsCrew(client=ScriptedClient([]))
+
+    assert crew.researcher.model == orchestrator.DEFAULT_MODEL
+    assert crew.decision_agent.model == orchestrator.DEFAULT_MODEL
+    assert crew.comms_agent.model == orchestrator.DEFAULT_COMMS_MODEL
+    assert orchestrator.DEFAULT_COMMS_MODEL != orchestrator.DEFAULT_MODEL
 
 
 def test_explicit_kwarg_wins_over_env_var(monkeypatch):
