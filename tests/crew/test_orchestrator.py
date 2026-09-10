@@ -144,12 +144,15 @@ def test_researcher_lookup_failure_escalates_without_a_second_researcher_call():
 def test_decision_incomplete_on_a_high_risk_report_still_dispatches_a_security_alert():
     """Live behavior this reproduces: the Researcher correctly scores a case
     high risk, but the Decision agent stalls (ends its turn without calling
-    submit_decision) before ever routing anything to security. Without the
-    orchestrator's own fallback, that risk finding would be dropped on the
-    floor -- the customer still gets a safe reply, but Trust & Safety would
-    never hear about a risk_score=90 case. This proves the fallback fires
-    without a second LLM call (client.calls stays at exactly the Researcher's
-    4 + Decision's 1 stalled attempt)."""
+    submit_decision) before ever routing anything to security. tool_loop's
+    own forced-retry (see resolver_agent/tool_loop.py's _forced_stop_call)
+    gets one more attempt with tool_choice pinned to submit_decision -- this
+    scripts that retry stalling too, so the case still reaches genuine
+    decision_incomplete. Without the orchestrator's own fallback, that risk
+    finding would be dropped on the floor -- the customer still gets a safe
+    reply, but Trust & Safety would never hear about a risk_score=90 case.
+    This proves the fallback fires without any further LLM call (client.calls
+    stays at exactly the Researcher's 4 + Decision's 2 stalled attempts)."""
     client = ScriptedClient(
         [
             # Researcher -- succeeds, flags high risk
@@ -178,6 +181,8 @@ def test_decision_incomplete_on_a_high_risk_report_still_dispatches_a_security_a
             ),
             # Decision -- stalls: ends its turn in plain text, never calls submit_decision
             ScriptedResponse([text_block("I don't have enough information to proceed.")], stop_reason="end_turn"),
+            # tool_loop's forced retry (tool_choice pinned to submit_decision) -- stalls too
+            ScriptedResponse([text_block("Still not sure.")], stop_reason="end_turn"),
         ]
     )
     crew = OperationsCrew(client=client, model="x")
@@ -194,7 +199,7 @@ def test_decision_incomplete_on_a_high_risk_report_still_dispatches_a_security_a
     assert result.alert_record is not None
     assert result.alert_record["delivered"] is True
     assert any("dispatched a direct security alert" in line for line in result.reasoning_chain)
-    assert client.calls == 5  # Researcher's 4 calls + Decision's 1 stalled attempt -- no LLM call for the alert itself
+    assert client.calls == 6  # Researcher's 4 calls + Decision's 2 stalled attempts -- no LLM call for the alert itself
 
 
 def test_decision_incomplete_on_a_low_risk_report_dispatches_no_alert():
@@ -230,6 +235,8 @@ def test_decision_incomplete_on_a_low_risk_report_dispatches_no_alert():
             ),
             # Decision -- stalls the same way
             ScriptedResponse([text_block("I don't have enough information to proceed.")], stop_reason="end_turn"),
+            # tool_loop's forced retry (tool_choice pinned to submit_decision) -- stalls too
+            ScriptedResponse([text_block("Still not sure.")], stop_reason="end_turn"),
         ]
     )
     crew = OperationsCrew(client=client, model="x")
@@ -241,7 +248,7 @@ def test_decision_incomplete_on_a_low_risk_report_dispatches_no_alert():
     assert result.alert_sent is False
     assert result.escalation is None
     assert result.alert_record is None
-    assert client.calls == 5
+    assert client.calls == 6  # Researcher's 4 calls + Decision's 2 stalled attempts
 
 
 def test_clean_case_never_dispatches_a_real_alert_even_if_the_model_tries():

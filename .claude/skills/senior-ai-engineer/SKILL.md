@@ -58,10 +58,16 @@ Key facts, already true in the code -- don't re-derive them, use them:
 - **Structured output is a forced tool call, not parsed text.** `submit_resolution`
   (`output_tool.py`) is a 5th tool with a real JSON schema, so its arguments arrive
   API-schema-validated -- no regex, no "hope it parses." The model is told (in `prompts.py`) to
-  call it last, but isn't forced to from turn one. As a safety net, if `max_iterations` is about to
-  be hit without a call, `tool_loop.py` forces one final turn with `tool_choice` pinned to
-  `submit_resolution`, so the agent always terminates with valid structured output. That API-side
-  schema constraint is still independently re-checked by `validate_schema()` -- see below.
+  call it last, but isn't forced to from turn one. As a safety net, `tool_loop.py` forces one turn
+  with `tool_choice` pinned to `submit_resolution` (via the shared `_forced_stop_call` helper) both
+  if `max_iterations` is about to be hit without a call, and if the model ends any earlier turn
+  without calling a tool at all -- the latter observed live on Part 2's Decision agent (a stray
+  `stop_reason='end_turn'`, no text, no tool call; not a token-budget issue, `max_tokens` was
+  nowhere near hit) and reproduced in 23 isolated attempts against the exact same input without
+  recurring, so treat it as rare-but-real, not a systematic prompt/scenario problem. Either way the
+  agent always terminates with valid structured output instead of trailing off mid-thought or
+  giving up on one bad turn. That API-side schema constraint is still independently re-checked by
+  `validate_schema()` -- see below.
 
 - **Four decision values, not three:** `AUTO_REFUND_APPROVED`, `REJECTED`, `ESCALATION_REQUIRED`,
   `CANNOT_RESOLVE`. The fourth exists specifically for the hallucination trap -- a nonexistent
