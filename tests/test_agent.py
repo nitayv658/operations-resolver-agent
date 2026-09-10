@@ -212,10 +212,17 @@ def test_resolve_when_submit_resolution_call_is_missing_customer_response_should
 
 def test_resolve_when_fallback_resolution_used_should_log_warning(caplog):
     # The model produces plain text instead of any tool_use on its very
-    # first turn -- run_tool_loop reports this as an ordinary "stop" (it
+    # first turn -- run_tool_loop makes one forced retry (tool_choice pinned
+    # to submit_resolution) before giving up; scripted to stall too, so this
+    # still reaches genuine fallback. Reports this as an ordinary "stop" (it
     # never entered the tool-calling branch), but no submit_resolution call
     # was ever captured, so ResolverAgent still has to fall back safely.
-    client = ScriptedClient([ScriptedResponse([text_block("I don't know what to do.")], stop_reason="end_turn")])
+    client = ScriptedClient(
+        [
+            ScriptedResponse([text_block("I don't know what to do.")], stop_reason="end_turn"),
+            ScriptedResponse([text_block("Still don't know.")], stop_reason="end_turn"),
+        ]
+    )
     agent = ResolverAgent(client=client)
 
     with caplog.at_level(logging.WARNING, logger="resolver_agent"):

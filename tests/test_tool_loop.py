@@ -382,30 +382,75 @@ def test_run_tool_loop_when_max_iterations_reached_should_log_warning(tool_schem
     assert any(r.getMessage() == "tool_loop.max_iterations_reached" for r in caplog.records)
 
 
-def test_run_tool_loop_when_model_stops_without_tool_call_should_log_the_text(
+def test_run_tool_loop_when_model_stops_without_tool_call_should_log_the_text_and_retry(
     tool_schemas, tool_registry, caplog
 ):
-    """A turn that ends in plain text instead of a tool call is otherwise a
-    silent dead end -- the caller only ever learns stopped_reason='stop',
-    with no way to see what the model actually said. This is the exact
-    failure mode observed live on the Part 2 crew's Decision agent, where
-    it was undiagnosable after the fact for lack of exactly this log line.
+    """A turn that ends in plain text instead of a tool call used to be an
+    immediate, silent dead end -- the caller only ever learned
+    stopped_reason='stop', with no way to see what the model actually said,
+    and no chance to recover. This is the exact failure mode observed live
+    on the Part 2 crew's Decision agent (undiagnosable at the time for lack
+    of this log line): an occasional stray turn with no tool call and no
+    text at all. The loop now makes one forced retry (tool_choice pinned to
+    the stop tool) before giving up -- this test's second scripted response
+    is that retry succeeding.
     """
     with caplog.at_level(logging.WARNING, logger="resolver_agent.tool_loop"):
         result = _run(
             [
                 ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
                 ScriptedResponse([text_block("I don't have enough information to proceed.")], stop_reason="end_turn"),
+                # forced retry (tool_choice pinned to the stop tool): recovers
+                ScriptedResponse(
+                    [
+                        tool_use_block(
+                            SUBMIT_RESOLUTION_TOOL_NAME,
+                            {
+                                "reasoning_chain": ["recovered after a stray non-tool-use turn"],
+                                "action_taken": {"tools_called": [], "decision": "ESCALATION_REQUIRED", "refund_amount": None, "refund_id": None},
+                                "customer_response": "...",
+                            },
+                        )
+                    ]
+                ),
+            ],
+            tool_schemas,
+            tool_registry,
+        )
+
+    records = [r for r in caplog.records if r.getMessage() == "tool_loop.stopped_without_tool_call"]
+    assert len(records) == 1
+    assert records[0].fields["api_stop_reason"] == "end_turn"
+    assert records[0].fields["text"] == "I don't have enough information to proceed."
+
+    # The retry recovered -- a valid submit_resolution call made it into
+    # tool_calls, which is what callers actually check (not stopped_reason).
+    assert result.stopped_reason == "stop"
+    assert any(c.name == SUBMIT_RESOLUTION_TOOL_NAME for c in result.tool_calls)
+
+
+def test_run_tool_loop_when_early_stop_and_the_forced_retry_also_fails_should_give_up(
+    tool_schemas, tool_registry, caplog
+):
+    """The early-stop retry is a single attempt, not a retry loop -- if the
+    model still doesn't call the stop tool even with tool_choice pinned to
+    it, the loop gives up rather than retrying indefinitely."""
+    with caplog.at_level(logging.WARNING, logger="resolver_agent.tool_loop"):
+        result = _run(
+            [
+                ScriptedResponse([text_block("I'm not sure what to do.")], stop_reason="end_turn"),
+                # forced retry: model still doesn't comply
+                ScriptedResponse([text_block("Still not sure.")], stop_reason="end_turn"),
             ],
             tool_schemas,
             tool_registry,
         )
 
     assert result.stopped_reason == "stop"
-    records = [r for r in caplog.records if r.getMessage() == "tool_loop.stopped_without_tool_call"]
+    assert not any(c.name == SUBMIT_RESOLUTION_TOOL_NAME for c in result.tool_calls)
+    records = [r for r in caplog.records if r.getMessage() == "tool_loop.forced_call_did_not_call_stop_tool"]
     assert len(records) == 1
-    assert records[0].fields["api_stop_reason"] == "end_turn"
-    assert records[0].fields["text"] == "I don't have enough information to proceed."
+    assert records[0].fields["text"] == "Still not sure."
 
 
 def test_run_tool_loop_when_forced_final_call_produces_no_stop_tool_should_log_the_text(

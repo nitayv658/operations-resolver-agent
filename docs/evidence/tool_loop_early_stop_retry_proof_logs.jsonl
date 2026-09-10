@@ -1,0 +1,6 @@
+{"level": "INFO", "logger": "resolver_agent.crew.researcher.agent", "event": "researcher.report_produced", "risk_band": "low", "risk_score": 0, "case_id": "c80ca9e4", "agent_role": "researcher"}
+INJECTING fake stalled response for Decision's first call
+{"level": "WARNING", "logger": "resolver_agent.tool_loop", "event": "tool_loop.stopped_without_tool_call", "api_stop_reason": "end_turn", "text": null, "case_id": "c80ca9e4", "agent_role": "decision"}
+{"level": "INFO", "logger": "resolver_agent.crew.decision.agent", "event": "decision.decision_produced", "refund_status": "ESCALATION_REQUIRED", "case_id": "c80ca9e4", "agent_role": "decision"}
+{"level": "INFO", "logger": "resolver_agent.crew.comms.agent", "event": "comms.result_produced", "alert_sent": false, "case_id": "c80ca9e4", "agent_role": "comms"}
+{"level": "INFO", "logger": "resolver_agent.crew.orchestrator", "event": "crew.case_resolved", "refund_status": "ESCALATION_REQUIRED", "alert_sent": false, "stopped_reason": "stop", "case_id": "c80ca9e4"}

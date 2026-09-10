@@ -106,6 +106,60 @@ def _create(client: "anthropic.Anthropic", tool_calls_so_far: List[ToolCallRecor
         raise ModelAPIError(list(tool_calls_so_far), exc) from exc
 
 
+def _forced_stop_call(
+    client: "anthropic.Anthropic",
+    tool_calls: List[ToolCallRecord],
+    model: str,
+    max_tokens: int,
+    cached_system: List[Dict[str, Any]],
+    messages: List[Dict[str, Any]],
+    cached_tools: List[Dict[str, Any]],
+    stop_tool_name: str,
+    extra_kwargs: Dict[str, Any],
+    ctx: Dict[str, Any],
+) -> Any:
+    """Make one forced call with ``tool_choice`` pinned to ``stop_tool_name``,
+    append it to ``messages``, and record the call in ``tool_calls`` if the
+    model actually made it.
+
+    Shared by both places a caller's "finish now" signal is missing: after
+    ``max_iterations`` rounds of the model still calling other tools, and
+    (see the early-stop retry in ``run_tool_loop``) a single stray round
+    where the model ends its turn with neither a tool call nor any text at
+    all -- observed live on Part 2's Decision agent (``stop_reason='end_turn'``,
+    no text, no tool call, no discernible cause -- not a token-budget issue,
+    since ``max_tokens`` was nowhere near hit). Forcing the model's hand once
+    is far cheaper and more reliable than giving up on a stray empty turn.
+    """
+    response = _create(
+        client,
+        tool_calls,
+        model=model,
+        max_tokens=max_tokens,
+        system=cached_system,
+        messages=messages,
+        tools=cached_tools,
+        tool_choice={"type": "tool", "name": stop_tool_name},
+        **extra_kwargs,
+    )
+    messages.append({"role": "assistant", "content": response.content})
+    made_stop_call = False
+    for block in response.content:
+        if block.type == "tool_use" and block.name == stop_tool_name:
+            tool_calls.append(ToolCallRecord(block.name, block.input, None))
+            made_stop_call = True
+    if not made_stop_call:
+        log_event(
+            _logger,
+            logging.WARNING,
+            "tool_loop.forced_call_did_not_call_stop_tool",
+            api_stop_reason=response.stop_reason,
+            text=_text_of(response),
+            **ctx,
+        )
+    return response
+
+
 def _cacheable_system(system: str) -> List[Dict[str, Any]]:
     """Wrap the system prompt as a content block with a cache_control
     breakpoint, instead of passing it as the bare string the API also
@@ -159,11 +213,17 @@ def run_tool_loop(
       * the model's turn calls ``stop_tool_name`` (the caller's "I am
         finished" signal -- used for ``submit_resolution`` here), or
       * the model's ``stop_reason`` is not ``tool_use`` (it produced plain
-        text instead of calling a tool), or
-      * ``max_iterations`` rounds pass without either -- the loop then forces
-        one last turn with ``tool_choice`` pinned to ``stop_tool_name``, so
-        the agent always terminates with a valid structured answer instead of
-        spinning forever.
+        text, or nothing at all, instead of calling a tool) -- if
+        ``stop_tool_name`` is set, this is not immediately fatal: the loop
+        makes one forced retry with ``tool_choice`` pinned to
+        ``stop_tool_name`` before giving up (see ``_forced_stop_call``).
+        Observed live on Part 2's Decision agent: an occasional stray turn
+        with ``stop_reason='end_turn'``, no text, and no tool call --
+        not a token-budget issue (``max_tokens`` was nowhere near hit) --
+        that a single forced retry reliably recovers from, or
+      * ``max_iterations`` rounds pass without either -- the loop then makes
+        the same kind of forced retry, so the agent always terminates with a
+        valid structured answer instead of spinning forever.
 
     A tool call repeated with the exact same arguments is not re-executed --
     a synthetic tool_result tells the model the retry was refused. This is
@@ -224,6 +284,19 @@ def run_tool_loop(
                 text=_text_of(response),
                 **ctx,
             )
+            if stop_tool_name is not None:
+                response = _forced_stop_call(
+                    client,
+                    tool_calls,
+                    model,
+                    max_tokens,
+                    cached_system,
+                    messages,
+                    cached_tools,
+                    stop_tool_name,
+                    extra_kwargs,
+                    ctx,
+                )
             return ToolLoopResult(response, messages, tool_calls, "stop")
 
         messages.append({"role": "assistant", "content": response.content})
@@ -303,31 +376,17 @@ def run_tool_loop(
 
     if stop_tool_name is not None:
         log_event(_logger, logging.WARNING, "tool_loop.max_iterations_reached", max_iterations=max_iterations, **ctx)
-        response = _create(
+        response = _forced_stop_call(
             client,
             tool_calls,
-            model=model,
-            max_tokens=max_tokens,
-            system=cached_system,
-            messages=messages,
-            tools=cached_tools,
-            tool_choice={"type": "tool", "name": stop_tool_name},
-            **extra_kwargs,
+            model,
+            max_tokens,
+            cached_system,
+            messages,
+            cached_tools,
+            stop_tool_name,
+            extra_kwargs,
+            ctx,
         )
-        messages.append({"role": "assistant", "content": response.content})
-        made_stop_call = False
-        for block in response.content:
-            if block.type == "tool_use" and block.name == stop_tool_name:
-                tool_calls.append(ToolCallRecord(block.name, block.input, None))
-                made_stop_call = True
-        if not made_stop_call:
-            log_event(
-                _logger,
-                logging.WARNING,
-                "tool_loop.forced_call_did_not_call_stop_tool",
-                api_stop_reason=response.stop_reason,
-                text=_text_of(response),
-                **ctx,
-            )
 
     return ToolLoopResult(response, messages, tool_calls, "max_iterations")
