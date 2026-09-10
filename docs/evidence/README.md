@@ -96,3 +96,61 @@ pytest tests/                                       # this package's own logic, 
 LOG_LEVEL=INFO python3 scripts/run_scenarios.py > out.txt 2> logs.jsonl        # Part 1, needs ANTHROPIC_API_KEY
 LOG_LEVEL=INFO python3 scripts/run_crew_scenarios.py > out.txt 2> logs.jsonl   # Part 2, needs ANTHROPIC_API_KEY
 ```
+
+## `tool_loop.py`'s early-stop retry, proven live in the full crew pipeline
+
+`resolver_agent/tool_loop.py` (shared by every agent in both parts) makes
+one forced retry, `tool_choice` pinned to the caller's stop tool, if a turn
+ends without any tool call at all — not just after `max_iterations` is
+exhausted. This was added after a live reliability issue: repeated
+`scripts/run_crew_scenarios.py` runs intermittently missed the P1-2
+scenario with `refund_status='decision_incomplete'`. The logs showed why:
+`tool_loop.stopped_without_tool_call` with `api_stop_reason='end_turn'` and
+`text=null` — the Decision agent's turn ended with neither a tool call nor
+any text at all. Not a token-budget issue (`max_tokens` was nowhere near
+hit), and rare enough that 23 isolated retries against the exact same input
+never reproduced it.
+
+Unit tests (`tests/test_tool_loop.py`) prove the retry logic deterministically
+against a scripted model. To also prove it live, in the real crew pipeline,
+against the real API — not just plausible from the code — this run
+reproduces the *exact* real failure signature by intercepting one live API
+response and replacing it with the documented signature
+(`stop_reason='end_turn'`, empty content), on the Decision agent's first
+call only, within an otherwise completely real `OperationsCrew.handle_ticket()`
+call: a real Researcher call, a real live retry call recovering from the
+injected stall, and a real Comms call.
+
+- [`tool_loop_early_stop_retry_proof_output.txt`](tool_loop_early_stop_retry_proof_output.txt) — the resulting `CrewResult`.
+- [`tool_loop_early_stop_retry_proof_logs.jsonl`](tool_loop_early_stop_retry_proof_logs.jsonl) — structured logs for the same run, plus one plain-text line marking exactly when the fault was injected (not a JSON log line — it's this script's own annotation, not something `resolver_agent` emits).
+
+**Result:** `tool_loop.stopped_without_tool_call` fires once, for `agent_role=decision`, with `api_stop_reason='end_turn'` and `text=null` — byte-for-byte the same signature as the two real production incidents. Immediately after, `decision.decision_produced` fires with a valid `refund_status` — the forced retry (a genuine second live API call) recovered it. The case resolves with `stopped_reason='stop'`, not `decision_incomplete`: end to end, exactly as if the stray turn had never happened.
+
+To reproduce (needs `ANTHROPIC_API_KEY`; costs one extra live call for the injected retry):
+
+```bash
+python3 -c "
+import sys
+from types import SimpleNamespace
+from resolver_agent.crew.orchestrator import OperationsCrew
+from resolver_agent.logging_utils import configure_logging
+from resolver_agent import tool_loop as tl
+
+configure_logging()
+_orig_create = tl._create
+injected = {'done': False}
+
+def _spying_create(client_, tool_calls_so_far, **kwargs):
+    is_decision_call = any(t.get('name') == 'process_refund' for t in kwargs.get('tools') or [])
+    if is_decision_call and not injected['done']:
+        injected['done'] = True
+        print('INJECTING fake stalled response for Decision\'s first call', file=sys.stderr)
+        return SimpleNamespace(stop_reason='end_turn', content=[], usage=None)
+    return _orig_create(client_, tool_calls_so_far, **kwargs)
+
+tl._create = _spying_create
+crew = OperationsCrew()
+result = crew.handle_ticket('Order ORD-1002. The espresso machine is dented and leaking. I paid 150 dollars for this. I want my money back today.')
+print('stopped_reason:', result.stopped_reason, '| decision is None:', result.decision is None)
+"
+```

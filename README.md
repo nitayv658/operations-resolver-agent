@@ -246,7 +246,7 @@ feature:
 | Order or user that doesn't exist (hallucination trap) | Tools return `{"error": ...}`; the prompt treats that as a stop signal, not something to paper over — `decision` becomes `CANNOT_RESOLVE`. |
 | Repeating the same tool call | `tool_loop.py` tracks `(tool_name, args)` signatures already seen and refuses to re-execute, telling the model to act on what it already has. |
 | Runaway loop | `max_iterations` (default 8) caps the tool-calling rounds; if hit, the loop forces a final `submit_resolution` call instead of hanging or trailing off. |
-| A turn ends with no tool call at all | Observed live on Part 2's Decision agent (a stray `stop_reason='end_turn'`, no text, no tool call — not a token-budget issue). `tool_loop.py` makes one forced retry with `tool_choice` pinned to the stop tool before giving up, same mechanism as the runaway-loop case above. |
+| A turn ends with no tool call at all | Observed live on Part 2's Decision agent (a stray `stop_reason='end_turn'`, no text, no tool call — not a token-budget issue). `tool_loop.py` makes one forced retry with `tool_choice` pinned to the stop tool before giving up, same mechanism as the runaway-loop case above — [proven live in the full crew pipeline](docs/evidence/README.md#tool_looppys-early-stop-retry-proven-live-in-the-full-crew-pipeline), not just plausible from the code. |
 | API/network failure | The SDK already retries connection errors and 408/409/429/5xx; anything that still reaches `tool_loop.py` is wrapped as a typed `ModelAPIError`, and `resolve()` turns that into a safe `ESCALATION_REQUIRED` rather than crashing the caller. Any other exception (a real bug) still propagates. |
 
 ---

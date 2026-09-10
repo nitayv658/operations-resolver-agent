@@ -1,0 +1,14 @@
+=== RESULT ===
+decision is None: False
+refund_status: ESCALATION_REQUIRED
+stopped_reason: stop
+customer_response: Hi,
+
+Thank you for reaching out about order ORD-1002. We'd be happy to help with your refund request.
+
+To move forward, could you please let us know the reason for your refund? For example, are you experiencing an issue with the item, or would you like to return it?
+
+Once we have those details, we'll review your request right away.
+
+Best regards,
+GlobalCart Support
