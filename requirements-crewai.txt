@@ -1,0 +1,23 @@
+# Dependencies for the CrewAI port of Part 1 (resolver_agent_crewai/).
+#
+# Kept separate from requirements.txt / requirements-dev.txt on purpose:
+# resolver_agent/ and resolver_agent/crew/ stay framework-free exactly as
+# documented in the root README's "Why a hand-rolled tool loop, not an
+# agent framework" section. Only this package opts into CrewAI.
+#
+# CrewAI requires Python >=3.10 -- this repo's main .venv is 3.9, so this
+# package needs its own environment (e.g. `python3.11 -m venv .venv-crewai`).
+-r requirements.txt
+# Pinned well past 0.86 on purpose: 0.86's Agent executor drives every tool
+# call through a legacy ReAct text-parsing loop that appends the tool's
+# Observation onto the *same* assistant turn and re-sends it as the last
+# message -- Anthropic's Messages API rejects any request ending in an
+# assistant-role message ("This model does not support assistant message
+# prefill"), so that loop breaks after exactly one tool call against Claude
+# models. 1.15+ ships a native Anthropic provider that uses the real
+# Messages API tool-use protocol instead (see crewai's Anthropic-provider
+# docs) -- the same protocol tool_loop.py already speaks for Part 1.
+# The native provider needs the [anthropic] extra -- it installs the real
+# anthropic SDK directly rather than routing everything through LiteLLM.
+crewai[anthropic]==1.15.21
+pytest>=8.0

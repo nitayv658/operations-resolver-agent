@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.venv-crewai/
 .DS_Store
 .pytest_cache/
 .vscode/
