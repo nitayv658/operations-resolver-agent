@@ -273,6 +273,69 @@ without your own API key.
 
 ---
 
+## Part 1b — A CrewAI port, for comparison
+
+[`resolver_agent_crewai/`](resolver_agent_crewai/) rebuilds the same single
+agent on [CrewAI](https://docs.crewai.com/) instead of `tool_loop.py`, kept
+side by side with `resolver_agent/` rather than replacing it — turning the
+["Why a hand-rolled tool loop, not an agent framework"](#why-a-hand-rolled-tool-loop-not-an-agent-framework)
+argument above into something demonstrated in code, not just asserted.
+
+`CrewResolverAgent` exposes the exact same contract as `ResolverAgent` —
+`.resolve(ticket_text, requester_user_id=None)` returning the same
+`submit_resolution`-shaped dict with the same `_case_id` / `_tool_calls` /
+`_validation_warnings` / `_corrections` / `_stopped_reason` /
+`_workflow_triggered` bookkeeping fields — so the two can run against the
+same ticket and be diffed. Everything that isn't loop-specific is reused,
+not duplicated: `output_tool.validate_schema` / `enforce_resolution`,
+`escalation_workflow.trigger_workflow`, `logging_utils`, and
+`authorization.authorize_tool_registry`.
+
+What the framework genuinely changes, not just renames:
+
+| | `resolver_agent/` (Part 1) | `resolver_agent_crewai/` |
+|---|---|---|
+| Structured final answer | A forced `tool_choice`-pinned call to `submit_resolution` if the model doesn't call it on its own (`tool_loop._forced_stop_call`) | CrewAI's `Task.output_pydantic` parses the agent's final answer directly — no equivalent forced-call safety net |
+| Tool-call trace | Automatic (`tool_loop.ToolCallRecord`, built into the loop) | Each CrewAI tool wrapper appends its own record (`resolver_agent_crewai/tools.py`) — the loop itself gives no trace |
+| API/infra failures | One typed `ModelAPIError`, distinguished from the SDK's own retries | CrewAI's native Anthropic provider (`crewai[anthropic]`) re-raises the real `anthropic.APIError` largely unchanged — the exact type `tool_loop.py` itself catches, confirmed empirically — but without `ModelAPIError`'s exhausted-retries-vs-non-retryable distinction or its partial-trace payload (the `call_log` in `tools.py` covers that instead) |
+| Prompt caching | Explicit Anthropic `cache_control` breakpoints, reused every round | The native provider supports `cache_control` too (a `cache_breakpoint` flag CrewAI reads off a message), but nothing in this port sets it — an easy follow-up, not a framework limitation this time |
+| Iteration budget | `stopped_reason` distinguishes a clean stop from hitting `max_iterations` | Collapses to `"stop"` — CrewAI surfaces no equivalent signal |
+
+Needs its own environment: CrewAI requires Python ≥3.10, and this repo's
+main `.venv` is 3.9 (`requirements-crewai.txt`, run from e.g. `.venv-crewai`).
+`scripts/run_ticket_crewai.py` / `scripts/run_scenarios_crewai.py` mirror
+Part 1's scripts of the same name (the latter imports the exact same
+`SCENARIOS` list) so decisions can be compared 1:1 on identical tickets —
+and confirm it: **10/10 scenarios matched Part 1's decisions cleanly** (same
+pass condition as `scripts/run_scenarios.py` — the exact decision, zero
+`_validation_warnings`), on a live run against the real API.
+
+### A real version incompatibility, found by actually running it
+
+`crewai==0.86.0` was the first version installed, and it's fundamentally
+broken against Claude models past one tool call. Its `Agent` executor
+drives tool calls through a legacy ReAct text-parsing loop that appends the
+tool's result onto the *same* assistant turn and re-sends that as the
+conversation's last message — but Anthropic's Messages API rejects any
+request ending in an assistant-role message
+(`"This model does not support assistant message prefill"`). Every scenario
+failed identically after exactly one tool call, falling back to
+`ESCALATION_REQUIRED` — which only looked like partial success because two
+of the ten scenarios happen to expect that decision anyway.
+
+CrewAI's changelog confirmed this is real and known: 1.15+ ships a native
+Anthropic provider (the `crewai[anthropic]` extra) that calls the real
+`anthropic` SDK directly and speaks its actual Messages API tool-use
+protocol — the same protocol `tool_loop.py` already speaks for Part 1.
+Upgrading to `crewai[anthropic]==1.15.21` is what took this from failing
+after one tool call to the 10/10 result above — and it changed something
+this package's own code had to catch up to: the native provider re-raises
+`anthropic.APIError` directly (confirmed empirically, not assumed), not the
+generic `openai.APIError` LiteLLM's older code path used, so `agent.py`'s
+`except` clause had to change to match.
+
+---
+
 ## Part 2 — Distributed Agent Crew
 
 > 📓 [`crew_demo.ipynb`](crew_demo.ipynb) — a runnable walkthrough against
