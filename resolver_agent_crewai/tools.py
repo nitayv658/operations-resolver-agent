@@ -33,7 +33,14 @@ import mock_services as gc  # noqa: E402  (path must be set up first)
 from resolver_agent.authorization import authorize_tool_registry  # noqa: E402
 from resolver_agent.tool_loop import ToolCallRecord  # noqa: E402
 
-_JSON_TYPE_MAP = {"string": str, "number": float, "integer": int, "boolean": bool}
+_JSON_TYPE_MAP = {
+    "string": str,
+    "number": float,
+    "integer": int,
+    "boolean": bool,
+    "object": Dict[str, Any],
+    "array": List[Any],
+}
 
 
 def _args_model(tool_schema: Dict[str, Any]) -> Type[BaseModel]:
