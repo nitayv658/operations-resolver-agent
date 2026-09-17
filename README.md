@@ -588,6 +588,113 @@ firing for real on the `P1-2` case) hold up even without your own API key.
 
 ---
 
+## Part 2b — A CrewAI port of the crew, for comparison
+
+[`resolver_agent_crewai/crew/`](resolver_agent_crewai/crew/) rebuilds the
+same three-agent pipeline on CrewAI, alongside
+[`resolver_agent_crewai/`](resolver_agent_crewai/)'s Part 1 port — same
+principle as Part 1b: reuse everything that isn't loop-specific, never touch
+`resolver_agent/crew/` itself. `CrewAIOperationsCrew.handle_ticket()` has the
+exact same signature and returns the exact same `CrewResult`; the control
+flow (a missing Researcher/Decision result stops the pipeline and escalates,
+never re-dispatches; a Decision failure on a report that already
+`requires_security_channel` pages security directly) is reproduced call for
+call from `orchestrator.py`. `_lookup_failure_response`,
+`_dispatch_fallback_security_alert`, `DEFAULT_COMMS_MODEL`,
+`validate_schema`/`enforce_risk_report`/`enforce_decision`,
+`find_stale_refund_detail`/`find_premature_approval_language`,
+`_guarded_registry`/`_safe_customer_response`, and even the per-agent
+`ResearcherResult`/`DecisionResult`/`CommsResult` dataclasses are all
+imported, not duplicated.
+
+One thing this port *doesn't* need that Part 1's did: `RiskReport`/`Decision`
+were already plain, framework-agnostic Pydantic models before any of this
+existed — no CrewAI-specific rewrite required to make them one. What it
+turned out to need instead, discovered only by actually building it: two
+*new* small Pydantic models
+([`crew/schemas.py`](resolver_agent_crewai/crew/schemas.py)) mirroring
+`submit_risk_report`/`submit_decision`'s tool schemas, not `RiskReport`/
+`Decision` themselves. The forced output at each stage is a genuinely
+different shape from the clean downstream object: the Researcher's is a
+status-discriminated union (`RiskReport` has no way to say "lookup failed"),
+and the Decision's excludes the nested `risk_report` entirely (that's
+attached by *code* afterward from the already-known upstream object, not
+re-emitted by the model — asking the LLM to reproduce it verbatim would be
+pure transcription-drift risk for no reason).
+
+### Three real bugs, found only by running it end to end
+
+- **A latent type gap in Part 1's own `tools.py`.** `_args_model()`'s
+  JSON-schema-to-Pydantic mapping had no case for `"object"`/`"array"` —
+  Part 1's four tools never had a dict- or array-typed parameter, so it went
+  unnoticed until Part 2's `send_slack_alert(payload: Dict)` hit it and
+  failed validation immediately. One-line fix
+  ([`resolver_agent_crewai/tools.py`](resolver_agent_crewai/tools.py)), but
+  it's exactly the kind of gap that only surfaces when a second, different
+  caller actually exercises the code path.
+- **CrewAI's `output_pydantic` parsing can raise a raw `pydantic.ValidationError`
+  instead of degrading gracefully.** Seen live: the model's final answer
+  occasionally collapsed to just one nested field (`evidence`) instead of
+  the full wrapper object, and `crew.kickoff()` let that exception escape
+  uncaught. This is the exact same situation the hand-rolled version treats
+  as "the model never called `submit_risk_report`" — a safe fallback, not a
+  crash — so the port now catches `pydantic.ValidationError` right alongside
+  `anthropic.APIError` and routes it to the same fallback.
+- **A single-field `output_pydantic` still matters.** Comms's forced output
+  is just `customer_response`, so the first version skipped `output_pydantic`
+  entirely and took the model's raw final-answer text directly — which let
+  the model's own scratchpad leak into the reply (observed live: *"The case
+  qualifies for automatic resolution... I'll now write the customer reply:
+  ---"* ahead of the actual text). Forcing even a trivial one-field schema
+  fixed it completely — the schema isn't only about typing, it's what makes
+  the model isolate exactly the field being asked for.
+
+### Reliability, not just correctness, is part of the comparison
+
+Even after those three fixes, the very first scenario run scored 1/6 — not
+from a bug, but from the model inconsistently omitting the Researcher's
+risk fields on the way into `output_pydantic`. Two more targeted responses
+closed the gap: a small backfill
+(`_backfill_researcher_ok_fields` in
+[`orchestrator.py`](resolver_agent_crewai/crew/orchestrator.py)) that fills
+a type-safe placeholder for any missing "OK"-required field before
+`validate_schema` runs — safe because `enforce_risk_report` unconditionally
+overwrites every one of those fields with the real `audit_fraud_risk` result
+regardless of what was there, so the placeholder's value never matters,
+only its type — and a task description spelling out the exact top-level
+JSON keys expected, explicitly warning the model not to output one of
+`audit_fraud_risk`'s nested fields as its entire answer. That combination
+took the live scenario suite from **1/6 → 6/6, confirmed twice in a row**.
+The hand-rolled version doesn't carry this risk at all: Anthropic's own
+tool-use argument generation is what fills `submit_risk_report`'s fields,
+not a second structured-output parsing layer sitting on top of it.
+
+### Same mechanism differences as Part 1b, plus one new one
+
+| | Hand-rolled (`resolver_agent/crew/`) | CrewAI port |
+|---|---|---|
+| Structured output per stage | A forced tool call, same mechanism as Part 1 | `Task.output_pydantic` per stage — needed two purpose-built schemas, not the shared `RiskReport`/`Decision` (see above) |
+| Reliability of complex/nested fields | Not a concern — Anthropic's own tool-argument generation fills them | Measurably unreliable without a backfill + an explicit key-list reminder in the task description (see above) |
+| Tool-call trace | Automatic, built into `tool_loop.py` | Each `build_*_tools()` wrapper builds its own `call_log` |
+| API/infra failures | One typed `ModelAPIError` | `anthropic.APIError` **and** `pydantic.ValidationError` caught per stage — two failure modes where the hand-rolled version only has one |
+| Prompt caching | Explicit `cache_control` breakpoints | Not wired up (same as Part 1b) |
+
+### Running it
+
+Needs the same `.venv-crewai` environment as Part 1's port (no new
+dependency).
+[`scripts/run_crew_crewai.py`](scripts/run_crew_crewai.py) /
+[`scripts/run_crew_scenarios_crewai.py`](scripts/run_crew_scenarios_crewai.py)
+mirror Part 2's scripts of the same name (the latter imports Part 2's exact
+`SCENARIOS` list) — confirmed **6/6 scenarios matched, twice in a row**,
+including the headline `B1` ORD-1005 fraud-override trap and its cap-leak
+correction firing correctly. `tests/crewai/crew/` (22 tests) covers what
+doesn't need a live model: the authority-separation guarantee for the
+CrewAI tool objects themselves, the `send_slack_alert` dispatch-boundary
+gate, per-agent model resolution, and the backfill helper.
+
+---
+
 ## A note on `.claude/`
 
 [`.claude/skills/senior-ai-engineer/SKILL.md`](.claude/skills/senior-ai-engineer/SKILL.md)
