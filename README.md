@@ -59,8 +59,9 @@ the full bug list and a mechanism-by-mechanism comparison table.
 
 #### [`feature/jev-gated-triage`](https://github.com/nitayv658/operations-resolver-agent/tree/feature/jev-gated-triage) — an experimental fast-path in front of Part 2's Decision stage
 
-Branched from `feature/crewai-port` (so it sits on top of that comparison,
-not `main` directly). Adds
+Branched directly from `main` — it only touches
+[`resolver_agent/crew/`](resolver_agent/crew/), nothing CrewAI-specific, so
+it doesn't need `feature/crewai-port`'s history at all. Adds
 [`resolver_agent/crew/jev_gate.py`](https://github.com/nitayv658/operations-resolver-agent/blob/feature/jev-gated-triage/resolver_agent/crew/jev_gate.py),
 a **disabled-by-default** gate inserted between the hand-rolled crew's
 Researcher and Decision stages. It exists to test a specific question: can a
@@ -80,7 +81,7 @@ It's kept explicitly as a validation of the guardrail architecture, not a
 production recommendation: the underlying `typesafe-sdk` dependency is
 unverified, adding it runs against this project's own "no unnecessary
 frameworks" philosophy (see below), and the cost/latency win is plausible
-but unmeasured against real ticket volume. That branch's README, "Part 2c",
+but unmeasured against real ticket volume. That branch's README, "Part 2b",
 lays out the full benefits-vs-tradeoffs case rather than presenting it as a
 clear win.
 
@@ -588,6 +589,124 @@ checked in CI, not just true by construction today.
 actual run against the live API, not just this README's description of one,
 so the crew's real tool-calling behavior and its corrections (`decision.corrected`
 firing for real on the `P1-2` case) hold up even without your own API key.
+
+---
+
+## Part 2b — An experimental Jev-gated triage gate
+
+[`resolver_agent/crew/jev_gate.py`](resolver_agent/crew/jev_gate.py) is a
+disabled-by-default experiment (`JEV_GATE_ENABLED=false`) that inserts a
+third-party classification API — "Jev" (TypeSafe AI) — between the
+Researcher and Decision stages. It exists to answer a specific question
+that came up while extending this codebase: *can a cheap, fast classifier
+sit in front of an LLM's own decision-making without weakening the
+guardrails the rest of this project is built around?* It's kept isolated on
+its own branch, off by default, and documented here with the tradeoffs
+laid out plainly rather than folded into the main design as if it were an
+obvious win.
+
+**What it actually is.** Jev is not a framework — it's a paid, hosted
+classification API (`typesafe-sdk`) offering fast `Score`/`Choice`/`Noul`
+primitives, pitched as a cheap pre-filter in front of an expensive LLM call
+(the "cascade pattern"). There is no confirmed real `typesafe-sdk` package;
+the only source for its shape is a marketing article. Everything here is
+built behind [`resolver_agent/jev_client.py`](resolver_agent/jev_client.py)'s
+`JevClient` interface specifically because of that — `MockJevClient` (the
+default, `JEV_MODE=mock`) needs no credentials at all, and `JevAPIClient`
+(`JEV_MODE=live`) is a best-effort, unverified guess that fails with a clear
+error rather than a bare `ImportError` if it's ever actually invoked.
+
+**Where it sits.** `jev_gate.run_gate()` grounds *before* scoring, never
+after: it extracts `{reason, claim_summary, sentiment, urgency}` from the
+ticket text, calls `check_return_policy` for real (not through the model),
+and only then builds a query for Jev from those grounded facts plus the
+Researcher's already-grounded `RiskReport`. The score gates what happens
+next — `fast_approve`/`fast_reject` skip straight to one forced
+`submit_decision` call; anything else (including any case with
+`blocks_automatic_refund=True`, checked before ever attempting a fast path)
+falls through to `DecisionAgent` running exactly as it does today, seeded
+with whatever grounding already happened so it isn't repeated.
+
+### Why this was worth trying
+
+- **Every branch is still checked by the same safety net.** A
+  `fast_approve`/`fast_reject` outcome is not trusted on Jev's or the
+  extraction step's say-so — it still passes through the *exact same*
+  `enforce_decision` (including the ORD-1005 fraud-block guardrail) that
+  `DecisionAgent`'s normal freeform path uses. No new safety logic exists
+  anywhere in this feature; it only decides *how* a decision gets produced.
+- **Grounding before scoring closes the obvious failure mode.** An earlier
+  version of this idea would have scored raw ticket text and let a
+  confident-but-wrong score skip tool calls entirely — denying a legitimate
+  claim without a single fact ever checked. Calling `check_return_policy`
+  first and building the query from its real output removes that risk by
+  construction, not by convention.
+- **Zero blast radius when off.** `JEV_GATE_ENABLED` defaults to `false`;
+  `orchestrator.py` skips the gate entirely in that case and never even
+  constructs a Jev client. The dependency is isolated in its own
+  [`requirements-jev.txt`](requirements-jev.txt), same principle as
+  `requirements-crewai.txt`.
+
+### Why it's not a clear win
+
+- **The core dependency is unverified.** There is no confirmed real
+  `typesafe-sdk` package or API contract — the entire live path is built
+  from a single dev.to article, not documentation for a product this
+  codebase can actually rely on.
+- **It runs against this project's own stated philosophy.** The root of
+  this README argues for a hand-rolled tool loop over an agent framework
+  specifically to avoid unnecessary dependencies and indirection (see "Why
+  a hand-rolled tool loop, not an agent framework" above). A paid,
+  third-party classification API is a bigger philosophical departure than
+  the `feature/crewai-port` branch is (see "Other versions of this project"
+  above) — that branch at least ports the *same* logic onto a different
+  execution mechanism; Jev adds genuinely new decision-making surface.
+- **The cost/latency win is unproven, not just unmeasured.** A fast path
+  still costs one extraction call, one Jev call, and one forced
+  `submit_decision` call before a decision exists — three round trips
+  before `enforce_decision` even runs. `DecisionAgent`'s own freeform path
+  is already just 2-3 tool calls for a clean case. Whether the fast path is
+  actually faster/cheaper in aggregate depends entirely on how often real
+  tickets land solidly on one side of the confidence threshold — untested
+  against real ticket volume.
+- **It doesn't close a pre-existing gap, only routes around it locally.**
+  [`decision/output_tool.py`](resolver_agent/crew/decision/output_tool.py)
+  has no "REJECTED must be backed by evidence" cross-check the way Part 1's
+  `output_tool.py` does — the gate's own `fast_reject` branch only fires
+  when `check_return_policy.eligible` is literally `False`, which sidesteps
+  the gap for itself, but `DecisionAgent`'s normal freeform path still
+  doesn't have that check today.
+- **New code surface for a feature most deployments would leave off.**
+  `jev_client.py`, `jev_gate.py`, and the `seed_messages`/`seed_seen_calls`
+  plumbing threaded through `tool_loop.py` and `DecisionAgent` are all
+  permanent additions to the codebase in exchange for a capability that
+  defaults to disabled.
+
+### Bottom line
+
+Worth keeping as a working, tested experiment precisely *because* it proves
+the guardrail architecture (`enforce_decision`, the fraud-block check,
+grounding-before-scoring) survives an aggressive shortcut attempt without
+being touched — that's a meaningful validation of Part 2's design. It is
+not, as shipped, a recommendation to route production refund decisions
+through an unverified paid third-party classifier; the honest framing is
+"here is how you'd wire one in safely if you had a real, trustworthy one,"
+not "this makes the crew better today."
+
+### Running it
+
+Disabled by default — the full existing test/scenario suite passes
+unchanged with no flag set. To exercise it: `JEV_GATE_ENABLED=true` (plus
+`ANTHROPIC_API_KEY` for the real extraction/decision calls; `JEV_MODE`
+stays at its default, `mock`, since no real Jev account exists) with
+[`scripts/run_crew_scenarios.py`](scripts/run_crew_scenarios.py), which
+already covers all three branches: ORD-1001 (clean → `fast_approve`),
+ORD-1003/ORD-1008 (ineligible → `fast_reject`), and ORD-1005/ORD-1012/
+ORD-1002 (fraud-blocked or over-cap → `fallthrough`). Unit coverage lives in
+`tests/crew/test_jev_client.py` and `tests/crew/test_jev_gate.py`, plus two
+additions to `tests/crew/test_orchestrator.py` proving the flag-off path is
+a byte-for-byte regression and that the ORD-1005 fraud-block guardrail
+survives a maximally confident, wrong Jev score end to end.
 
 ---
 
