@@ -28,9 +28,11 @@ import anthropic
 import multi_agent_tools as mat  # noqa: E402  (starter-kit/ is on sys.path -- see crew/__init__.py)
 
 from ..agent import DEFAULT_MAX_RETRIES, DEFAULT_MODEL
+from ..jev_client import get_jev_client
 from ..logging_utils import get_logger, log_event
+from . import jev_gate
 from .comms.agent import CommsAgent
-from .decision.agent import DecisionAgent
+from .decision.agent import DecisionAgent, DecisionResult
 from .researcher.agent import ResearcherAgent
 from .schemas import CrewResult, RiskReport
 
@@ -157,6 +159,35 @@ class OperationsCrew:
         self.decision_agent = DecisionAgent(self.client, self.decision_model, max_iterations_per_agent)
         self.comms_agent = CommsAgent(self.client, self.comms_model, max_iterations_per_agent)
 
+    def _run_decision_stage(self, risk_report: RiskReport, ticket_text: str, case_id: str) -> DecisionResult:
+        """Agent 2, optionally gated by Jev-scored grounded triage.
+
+        ``jev_gate.JEV_GATE_ENABLED`` defaults to false -- off, this is
+        exactly ``self.decision_agent.run(risk_report, case_id)``, today's
+        unchanged behavior. On, a fast_approve/fast_reject outcome from the
+        gate is used directly (already validated by the same
+        enforce_decision safety net DecisionAgent itself uses); a
+        fallthrough outcome still runs DecisionAgent normally, seeded with
+        whatever grounding the gate already did so it isn't repeated.
+        """
+        if not jev_gate.JEV_GATE_ENABLED:
+            return self.decision_agent.run(risk_report, case_id)
+
+        outcome = jev_gate.run_gate(
+            client=self.client,
+            model=self.decision_model,
+            ticket_text=ticket_text,
+            risk_report=risk_report,
+            tool_registry=self.decision_agent.tool_registry,
+            jev_client=get_jev_client(),
+            case_id=case_id,
+        )
+        if outcome.branch != "fallthrough":
+            return outcome.decision_result
+        return self.decision_agent.run(
+            risk_report, case_id, seed_messages=outcome.seed_messages, seed_seen_calls=outcome.seed_seen_calls
+        )
+
     def handle_ticket(self, ticket_text: str) -> CrewResult:
         case_id = uuid.uuid4().hex[:8]
         ctx = {"case_id": case_id}
@@ -182,7 +213,7 @@ class OperationsCrew:
             )
 
         risk_report = researcher_result.report
-        decision_result = self.decision_agent.run(risk_report, case_id)
+        decision_result = self._run_decision_stage(risk_report, ticket_text, case_id)
         if decision_result.decision is None:
             escalation: Optional[Dict[str, Any]] = None
             alert_sent = False
