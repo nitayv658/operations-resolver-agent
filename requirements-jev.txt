@@ -1,0 +1,16 @@
+# Dependencies for the (experimental, disabled-by-default) Jev-gated triage
+# in resolver_agent/crew/jev_gate.py.
+#
+# Kept separate from requirements.txt on purpose, same principle as
+# requirements-crewai.txt: the default install stays exactly as documented
+# in the root README's "Why a hand-rolled tool loop, not an agent framework"
+# section. JEV_GATE_ENABLED defaults to false and JEV_MODE defaults to
+# "mock" (resolver_agent/jev_client.py's MockJevClient, no credentials
+# needed) -- this file is only needed for JEV_MODE=live.
+-r requirements.txt
+# 'typesafe-sdk' is NOT a verified real PyPI package -- the only source for
+# it is a dev.to marketing article for "Jev" (TypeSafe AI). This file exists
+# so the live path is at least declared/installable if it turns out to be
+# real; resolver_agent/jev_client.py's JevAPIClient only imports it lazily,
+# and the mock path (the default) never touches this file at all.
+typesafe-sdk
