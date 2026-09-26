@@ -64,7 +64,7 @@ class ModelAPIError(RuntimeError):
         self.original = original
 
 
-def _signature(name: str, tool_input: Dict[str, Any]) -> tuple:
+def signature(name: str, tool_input: Dict[str, Any]) -> tuple:
     """A hashable, order-independent fingerprint of one tool call.
 
     ``tuple(sorted(tool_input.items()))`` (the original implementation) broke
@@ -75,8 +75,17 @@ def _signature(name: str, tool_input: Dict[str, Any]) -> tuple:
     key order) as the same signature -- ``sort_keys=True`` makes the string
     itself order-independent, same guarantee ``tuple(sorted(...))`` gave for
     the flat case.
+
+    Public (not ``_signature``) so a caller that pre-executes a tool call
+    outside the loop -- e.g. a deterministic grounding step -- can compute a
+    matching fingerprint to seed ``run_tool_loop``'s ``seed_seen_calls``,
+    without reaching into a private name.
     """
     return (name, json.dumps(tool_input, sort_keys=True, default=str))
+
+
+# Internal alias -- every call site in this module predates the public name.
+_signature = signature
 
 
 def _stringify(result: Any) -> str:
@@ -203,6 +212,7 @@ def run_tool_loop(
     temperature: Optional[float] = None,
     max_tokens: int = 4096,
     log_context: Optional[Dict[str, Any]] = None,
+    seed_seen_calls: Optional[set] = None,
 ) -> ToolLoopResult:
     """Run send -> tool_use -> tool_result -> send until the model stops.
 
@@ -228,6 +238,11 @@ def run_tool_loop(
     A tool call repeated with the exact same arguments is not re-executed --
     a synthetic tool_result tells the model the retry was refused. This is
     what stops a confused agent from looping on the same failing call.
+    ``seed_seen_calls`` (default ``None``, meaning "start empty" -- today's
+    exact behavior) lets a caller that already executed a tool call outside
+    this loop (see :func:`signature`) pre-populate that dedup set, so the
+    model can't redundantly re-run a call whose result it's about to be
+    shown in ``messages`` already.
 
     ``max_tokens`` defaults to 4096, not the API's own default of 1024 or
     the 2048 this used to be -- raised after a live run of the Part 2 crew
@@ -251,7 +266,7 @@ def run_tool_loop(
         raise ValueError(f"max_iterations must be at least 1, got {max_iterations!r}.")
 
     ctx = log_context or {}
-    seen_calls: set = set()
+    seen_calls: set = set(seed_seen_calls) if seed_seen_calls else set()
     tool_calls: List[ToolCallRecord] = []
     response = None
     # Some models (e.g. claude-sonnet-5) reject an explicit `temperature` --

@@ -117,6 +117,71 @@ def test_run_tool_loop_when_same_call_repeated_should_execute_only_once(tool_sch
     assert len(refusal_messages) == 1
 
 
+def test_run_tool_loop_seed_seen_calls_refuses_a_call_on_its_first_attempt(tool_schemas, tool_registry):
+    from resolver_agent.tool_loop import signature
+
+    # Would normally execute cleanly -- but its signature is pre-seeded as
+    # already-seen, so it must be refused immediately, not just deduped on a
+    # second identical attempt.
+    client = ScriptedClient(
+        [
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_RESOLUTION_TOOL_NAME,
+                        {
+                            "reasoning_chain": ["seeded call was refused"],
+                            "action_taken": {"tools_called": [], "decision": "ESCALATION_REQUIRED", "refund_amount": None, "refund_id": None},
+                            "customer_response": "...",
+                        },
+                    )
+                ]
+            ),
+        ]
+    )
+    seeded = run_tool_loop(
+        client=client,
+        model="mock",
+        system="(unused)",
+        messages=[{"role": "user", "content": "(scripted ticket)"}],
+        tool_schemas=tool_schemas,
+        tool_registry=tool_registry,
+        stop_tool_name=SUBMIT_RESOLUTION_TOOL_NAME,
+        max_iterations=8,
+        seed_seen_calls={signature("get_order_details", {"order_id": "ORD-1001"})},
+    )
+
+    executed = [c for c in seeded.tool_calls if c.name == "get_order_details"]
+    assert executed == []  # refused on the very first attempt, never dispatched
+
+
+def test_run_tool_loop_seed_seen_calls_none_is_a_no_op(tool_schemas, tool_registry):
+    # Default behavior (seed_seen_calls omitted) is unchanged -- a fresh
+    # empty dedup set, same as before this parameter existed.
+    result = _run(
+        [
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_RESOLUTION_TOOL_NAME,
+                        {
+                            "reasoning_chain": ["..."],
+                            "action_taken": {"tools_called": [], "decision": "ESCALATION_REQUIRED", "refund_amount": None, "refund_id": None},
+                            "customer_response": "...",
+                        },
+                    )
+                ]
+            ),
+        ],
+        tool_schemas,
+        tool_registry,
+    )
+    executed = [c for c in result.tool_calls if c.name == "get_order_details"]
+    assert len(executed) == 1
+
+
 def test_run_tool_loop_when_model_never_stops_should_force_final_call_and_report_max_iterations(
     tool_schemas, tool_registry
 ):
