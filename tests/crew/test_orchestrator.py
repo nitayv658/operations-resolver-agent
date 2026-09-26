@@ -4,11 +4,13 @@ tool dispatch throughout."""
 
 from __future__ import annotations
 
-from resolver_agent.crew import orchestrator
+from resolver_agent.crew import jev_gate, orchestrator
 from resolver_agent.crew.comms.output_tool import SUBMIT_COMMS_RESULT_TOOL_NAME
 from resolver_agent.crew.decision.output_tool import SUBMIT_DECISION_TOOL_NAME
+from resolver_agent.crew.jev_gate import TRIAGE_QUERY_TOOL_NAME
 from resolver_agent.crew.orchestrator import OperationsCrew
 from resolver_agent.crew.researcher.output_tool import SUBMIT_RISK_REPORT_TOOL_NAME
+from resolver_agent.jev_client import JevScore, MockJevClient
 
 from ..helpers import ScriptedClient, ScriptedResponse, text_block, tool_use_block
 
@@ -399,3 +401,204 @@ def test_explicit_kwarg_wins_over_env_var(monkeypatch):
     )
 
     assert crew.decision_agent.model == "decision-from-kwarg"
+
+
+# --------------------------------------------------------------------------- #
+# Jev-gated triage (resolver_agent/crew/jev_gate.py) -- disabled by default.
+# --------------------------------------------------------------------------- #
+
+
+def test_jev_gate_disabled_by_default_never_touches_get_jev_client(monkeypatch):
+    """JEV_GATE_ENABLED defaults to false -- handle_ticket must not even
+    construct a Jev client, let alone call it. Reuses the exact
+    test_clean_case_never_dispatches_a_real_alert_even_if_the_model_tries
+    script unchanged, proving the gate being present in the codebase doesn't
+    alter default behavior at all."""
+    assert jev_gate.JEV_GATE_ENABLED is False
+
+    def _boom():
+        raise AssertionError("get_jev_client() must not be called when JEV_GATE_ENABLED is false.")
+
+    monkeypatch.setattr(orchestrator, "get_jev_client", _boom)
+
+    client = ScriptedClient(
+        [
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1001"})]),
+            ScriptedResponse([tool_use_block("get_user_profile", {"user_id": "USR-101"})]),
+            ScriptedResponse([tool_use_block("audit_fraud_risk", {"order_id": "ORD-1001", "user_id": "USR-101"})]),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_RISK_REPORT_TOOL_NAME,
+                        {
+                            "status": "OK",
+                            "order_id": "ORD-1001",
+                            "user_id": "USR-101",
+                            "risk_score": 0,
+                            "risk_band": "low",
+                            "action_hint": "proceed with the normal refund flow",
+                            "triggered_rules": [],
+                            "evidence": {"order_total_usd": 35.0, "order_status": "delivered", "prior_fraud_flags": 0},
+                            "blocks_automatic_refund": False,
+                            "requires_security_channel": False,
+                            "rulebook_version": "1.0.0",
+                        },
+                    )
+                ]
+            ),
+            ScriptedResponse([tool_use_block("check_return_policy", {"order_id": "ORD-1001"})]),
+            ScriptedResponse([tool_use_block("process_refund", {"order_id": "ORD-1001", "amount": 35.0})]),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_DECISION_TOOL_NAME,
+                        {
+                            "order_id": "ORD-1001",
+                            "user_id": "USR-101",
+                            "verdict": "ELIGIBLE",
+                            "eligible": True,
+                            "refund_status": "APPROVED",
+                            "requested_amount": 35.0,
+                            "approved_amount": 35.0,
+                            "refund_id": "RF-1001-3500",
+                            "applicable_policies": ["POL-RET-02"],
+                            "rationale": "Eligible and within the cap.",
+                        },
+                    )
+                ]
+            ),
+            ScriptedResponse(
+                [tool_use_block(SUBMIT_COMMS_RESULT_TOOL_NAME, {"customer_response": "Your refund has been approved."})]
+            ),
+        ]
+    )
+    crew = OperationsCrew(client=client, model="x")
+
+    result = crew.handle_ticket("My earbuds from order ORD-1001 arrived cracked, please refund me.")
+
+    assert result.decision.refund_status == "APPROVED"
+
+
+def test_jev_gate_enabled_still_blocks_automatic_refund_on_a_fraud_flagged_report(monkeypatch):
+    """The ORD-1005 trap, replayed with the gate switched on and Jev forced
+    to confidently score fast_approve. The gate's own blocks_automatic_refund
+    guard must keep this out of the fast path entirely (falling through to
+    DecisionAgent, seeded with the gate's own check_return_policy call) --
+    and even the Decision stage's forced write-up here falsely claims
+    APPROVED, so this also proves enforce_decision's guardrail still fires
+    at the end of the (now gate-seeded) freeform path."""
+    monkeypatch.setattr(jev_gate, "JEV_GATE_ENABLED", True)
+    monkeypatch.setattr(
+        orchestrator,
+        "get_jev_client",
+        lambda: MockJevClient(scorer=lambda query: JevScore(score=1.0, confidence=1.0)),
+    )
+
+    client = ScriptedClient(
+        [
+            # Researcher
+            ScriptedResponse([tool_use_block("get_order_details", {"order_id": "ORD-1005"})]),
+            ScriptedResponse([tool_use_block("get_user_profile", {"user_id": "USR-105"})]),
+            ScriptedResponse([tool_use_block("audit_fraud_risk", {"order_id": "ORD-1005", "user_id": "USR-105"})]),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_RISK_REPORT_TOOL_NAME,
+                        {
+                            "status": "OK",
+                            "order_id": "ORD-1005",
+                            "user_id": "USR-105",
+                            "risk_score": 90,
+                            "risk_band": "high",
+                            "action_hint": "block the automatic refund and escalate to the security channel",
+                            "triggered_rules": [{"rule_id": "FR-01", "name": "repeat_refund_claims", "weight": 25, "why": "..."}],
+                            "evidence": {"order_total_usd": 480.0, "order_status": "delivered", "prior_fraud_flags": 1},
+                            "blocks_automatic_refund": True,
+                            "requires_security_channel": True,
+                            "rulebook_version": "1.0.0",
+                        },
+                    )
+                ]
+            ),
+            # Jev gate -- extraction call only (its own check_return_policy
+            # call is real/direct, not through the model); blocked from
+            # fast_approve by blocks_automatic_refund, so it falls through.
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        TRIAGE_QUERY_TOOL_NAME,
+                        {
+                            "reason": "damaged_on_arrival",
+                            "claim_summary": "Tablet screen was smashed on arrival.",
+                            "customer_stated_amount": 480.0,
+                            "sentiment": "frustrated",
+                            "urgency": "medium",
+                        },
+                    )
+                ]
+            ),
+            # Decision -- picks up from the gate's seeded check_return_policy
+            # result, calls process_refund itself, then falsely claims APPROVED.
+            ScriptedResponse([tool_use_block("process_refund", {"order_id": "ORD-1005", "amount": 480.0})]),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_DECISION_TOOL_NAME,
+                        {
+                            "order_id": "ORD-1005",
+                            "user_id": "USR-105",
+                            "verdict": "ELIGIBLE",
+                            "eligible": True,
+                            "refund_status": "APPROVED",  # false -- see assertions
+                            "requested_amount": 480.0,
+                            "approved_amount": 480.0,
+                            "refund_id": "RF-FAKE",
+                            "applicable_policies": ["POL-RET-01"],
+                            "rationale": "Claim is eligible under policy.",
+                        },
+                    )
+                ]
+            ),
+            # Comms
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        "get_escalation_route",
+                        {"risk_band": "high", "requested_amount": 480.0, "prior_fraud_flags": 1, "order_status": "delivered", "verdict": "ELIGIBLE"},
+                    )
+                ]
+            ),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        "send_slack_alert",
+                        {
+                            "channel_id": "CH-FRAUD",
+                            "severity": "critical",
+                            "payload": {"order_id": "ORD-1005", "user_id": "USR-105", "risk_score": 90, "risk_band": "high"},
+                        },
+                    )
+                ]
+            ),
+            ScriptedResponse(
+                [
+                    tool_use_block(
+                        SUBMIT_COMMS_RESULT_TOOL_NAME,
+                        {"customer_response": "Your request is being reviewed and we'll follow up shortly."},
+                    )
+                ]
+            ),
+        ]
+    )
+    crew = OperationsCrew(client=client, model="x")
+
+    result = crew.handle_ticket(
+        "This is Ronen, order ORD-1005. The tablet screen was smashed on arrival. Refund me the full 480 dollars."
+    )
+
+    assert result.decision is not None
+    assert result.decision.refund_status == "ESCALATION_REQUIRED"
+    assert result.decision.approved_amount is None
+    assert result.alert_sent is True
+    assert result.alert_record["channel_id"] == "CH-FRAUD"
+    assert any("blocks_automatic_refund" in line for line in result.reasoning_chain)
