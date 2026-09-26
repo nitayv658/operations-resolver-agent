@@ -18,6 +18,30 @@ for the tools themselves. Everything in this top-level README is the agent
 built *around* that starter kit. The original assignment brief is kept for
 reference in [`docs/quest-brief/`](docs/quest-brief/).
 
+### Other versions of this project, on other branches
+
+This branch (`main`) is the hand-rolled version: Part 1
+([`resolver_agent/`](resolver_agent/)) and Part 2
+([`resolver_agent/crew/`](resolver_agent/crew/)), no agent framework, exactly
+as argued for below. Two further branches build on top of it without being
+merged in — each is kept as its own branch, on purpose, so every version
+stays independently checkoutable and runnable rather than collapsing into
+one branch with feature flags:
+
+- **[`feature/crewai-port`](https://github.com/nitayv658/operations-resolver-agent/tree/feature/crewai-port)**
+  — ports both Part 1 and Part 2 onto the CrewAI framework
+  ([`resolver_agent_crewai/`](https://github.com/nitayv658/operations-resolver-agent/tree/feature/crewai-port/resolver_agent_crewai)),
+  reusing every piece of domain logic that isn't loop-specific rather than
+  duplicating it. See that branch's README for "Part 1b"/"Part 2b" — the
+  real bugs found only by building a second implementation of the same
+  design, and a head-to-head comparison table.
+- **[`feature/jev-gated-triage`](https://github.com/nitayv658/operations-resolver-agent/tree/feature/jev-gated-triage)**
+  — branched from `feature/crewai-port`; adds an experimental,
+  disabled-by-default triage gate in front of Part 2's hand-rolled Decision
+  stage, scored by a third-party classification API. See that branch's
+  README "Part 2c" for the honest benefits-vs-tradeoffs writeup — it's kept
+  as a working experiment, not folded into the main design.
+
 ---
 
 ## Architecture
