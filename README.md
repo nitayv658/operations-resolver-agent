@@ -18,72 +18,21 @@ for the tools themselves. Everything in this top-level README is the agent
 built *around* that starter kit. The original assignment brief is kept for
 reference in [`docs/quest-brief/`](docs/quest-brief/).
 
-### Other versions of this project, on other branches
+### This branch, relative to `main`
 
-This branch (`main`) is the hand-rolled version: Part 1
-([`resolver_agent/`](resolver_agent/)) and Part 2
-([`resolver_agent/crew/`](resolver_agent/crew/)), no agent framework, exactly
-as argued for below. Two further branches build on top of it without being
-merged in — each is kept as its own branch, on purpose, so every version
-stays independently checkoutable and runnable rather than collapsing into
-one branch with feature flags:
-
-#### [`feature/crewai-port`](https://github.com/nitayv658/operations-resolver-agent/tree/feature/crewai-port) — the same design, rebuilt on a framework
-
-[`resolver_agent_crewai/`](https://github.com/nitayv658/operations-resolver-agent/tree/feature/crewai-port/resolver_agent_crewai)
-ports **both** Part 1 (single agent) and Part 2 (the Researcher → Decision →
-Comms crew) onto CrewAI, agent by agent, task by task. The point of this
-branch isn't "CrewAI instead of hand-rolled" — it's a controlled comparison:
-every piece of domain logic that isn't loop-specific (`RiskReport`/`Decision`
-schemas, `enforce_risk_report`/`enforce_decision`, the fraud-block guardrail,
-`find_stale_refund_detail`/`find_premature_approval_language`, per-agent
-model resolution, even the dataclasses each stage returns) is *imported from
-`main`, not duplicated*. Only the mechanism that drives the model — Anthropic
-tool-use directly vs. CrewAI's `Agent`/`Task`/`Crew` abstractions — actually
-changes.
-
-That controlled setup is what makes the differences found worth trusting:
-a real type gap in Part 1's own `tools.py` (no JSON-schema mapping for
-`object`/`array`, invisible until Part 2's dict-typed `send_slack_alert`
-tripped it), CrewAI's `output_pydantic` occasionally raising a raw
-`pydantic.ValidationError` instead of degrading gracefully the way the
-hand-rolled fallback does, and a live scenario suite that started at **1/6**
-passing — not from a logic bug, but from the model inconsistently omitting
-required fields on the way into structured output — fixed only by a
-type-safe backfill plus an explicit key-list reminder in the task
-description, reaching **6/6, twice in a row**. None of that is a knock on
-CrewAI specifically; it's the actual cost of a second structured-output
-parsing layer sitting on top of the same tool-use protocol Part 1 already
-speaks directly. See that branch's README, "Part 1b"/"Part 2b" sections, for
-the full bug list and a mechanism-by-mechanism comparison table.
-
-#### [`feature/jev-gated-triage`](https://github.com/nitayv658/operations-resolver-agent/tree/feature/jev-gated-triage) — an experimental fast-path in front of Part 2's Decision stage
-
-Branched directly from `main` — it only touches
-[`resolver_agent/crew/`](resolver_agent/crew/), nothing CrewAI-specific, so
-it doesn't need `feature/crewai-port`'s history at all. Adds
-[`resolver_agent/crew/jev_gate.py`](https://github.com/nitayv658/operations-resolver-agent/blob/feature/jev-gated-triage/resolver_agent/crew/jev_gate.py),
-a **disabled-by-default** gate inserted between the hand-rolled crew's
-Researcher and Decision stages. It exists to test a specific question: can a
-cheap, fast third-party classifier ("Jev"/TypeSafe AI — paid, `Score`/
-`Choice`/`Noul` primitives, no confirmed real SDK beyond a marketing
-article) sit in front of an LLM's decision without weakening this project's
-guardrails? The gate grounds *before* scoring — it calls `check_return_policy`
-for real and only then builds Jev's query from that grounded result plus the
-Researcher's `RiskReport` — and the score only ever gates whether Decision's
-normal freeform reasoning is skipped; it never bypasses the same
-`enforce_decision` safety net (including the ORD-1005 fraud-block guardrail)
-that the unmodified path already uses. A confidently wrong score still can't
-produce a wrong final decision — proven with a test that forces exactly that
-and asserts the correction fires.
-
-It's kept explicitly as a validation of the guardrail architecture, not a
-production recommendation: the underlying `typesafe-sdk` dependency is
-unverified, adding it runs against this project's own "no unnecessary
-frameworks" philosophy (see below), and the cost/latency win is plausible
-but unmeasured against real ticket volume. That branch's README, "Part 2b",
-lays out the full benefits-vs-tradeoffs case rather than presenting it as a
-clear win.
+`main` is the hand-rolled version: Part 1 ([`resolver_agent/`](resolver_agent/))
+and Part 2 ([`resolver_agent/crew/`](resolver_agent/crew/)), no agent
+framework, exactly as argued for below. This branch
+(`feature/jev-gated-triage`) is branched directly from `main` and adds one
+thing on top of it: an experimental, **disabled-by-default**
+([`resolver_agent/crew/jev_gate.py`](resolver_agent/crew/jev_gate.py)) triage
+gate in front of Part 2's Decision stage, scored by a third-party
+classification API ("Jev"/TypeSafe AI). It only touches
+[`resolver_agent/crew/`](resolver_agent/crew/) — nothing CrewAI-specific — so
+it's kept as its own branch off `main` rather than off the separate
+`feature/crewai-port` branch this project also keeps. See "Part 2b" below
+for the full design and an honest benefits-vs-tradeoffs writeup; see `main`'s
+own README for the other branches this project keeps separately.
 
 ---
 
