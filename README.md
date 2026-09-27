@@ -59,8 +59,9 @@ the full bug list and a mechanism-by-mechanism comparison table.
 
 #### [`feature/jev-gated-triage`](https://github.com/nitayv658/operations-resolver-agent/tree/feature/jev-gated-triage) — an experimental fast-path in front of Part 2's Decision stage
 
-Branched from `feature/crewai-port` (so it sits on top of that comparison,
-not `main` directly). Adds
+Branched directly from `main` — it only touches
+[`resolver_agent/crew/`](resolver_agent/crew/), nothing CrewAI-specific, so
+it doesn't need `feature/crewai-port`'s history at all. Adds
 [`resolver_agent/crew/jev_gate.py`](https://github.com/nitayv658/operations-resolver-agent/blob/feature/jev-gated-triage/resolver_agent/crew/jev_gate.py),
 a **disabled-by-default** gate inserted between the hand-rolled crew's
 Researcher and Decision stages. It exists to test a specific question: can a
@@ -80,7 +81,7 @@ It's kept explicitly as a validation of the guardrail architecture, not a
 production recommendation: the underlying `typesafe-sdk` dependency is
 unverified, adding it runs against this project's own "no unnecessary
 frameworks" philosophy (see below), and the cost/latency win is plausible
-but unmeasured against real ticket volume. That branch's README, "Part 2c",
+but unmeasured against real ticket volume. That branch's README, "Part 2b",
 lays out the full benefits-vs-tradeoffs case rather than presenting it as a
 clear win.
 
