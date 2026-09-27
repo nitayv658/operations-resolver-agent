@@ -61,9 +61,25 @@ class DecisionAgent:
         self.tool_schemas = list(mat.DECISION_TOOLS) + [SUBMIT_DECISION_SCHEMA]
         self.tool_registry = {name: mat.TOOL_REGISTRY[name] for name in _DECISION_TOOL_NAMES}
 
-    def run(self, risk_report: RiskReport, case_id: str) -> DecisionResult:
+    def run(
+        self,
+        risk_report: RiskReport,
+        case_id: str,
+        *,
+        seed_messages: Optional[List[Dict[str, Any]]] = None,
+        seed_seen_calls: Optional[set] = None,
+    ) -> DecisionResult:
+        """``seed_messages``/``seed_seen_calls`` let a caller that already
+        ran some grounding outside this method (see
+        ``resolver_agent.crew.jev_gate``) hand it over, so this agent's own
+        loop doesn't redundantly repeat it. Both default to ``None`` --
+        today's exact behavior: a fresh message list seeded only with the
+        risk report, and an empty dedup set.
+        """
         ctx = {"case_id": case_id, "agent_role": "decision"}
-        messages: List[Dict[str, Any]] = [{"role": "user", "content": risk_report.model_dump_json()}]
+        messages: List[Dict[str, Any]] = (
+            seed_messages if seed_messages is not None else [{"role": "user", "content": risk_report.model_dump_json()}]
+        )
 
         try:
             result = run_tool_loop(
@@ -76,6 +92,7 @@ class DecisionAgent:
                 stop_tool_name=SUBMIT_DECISION_TOOL_NAME,
                 max_iterations=self.max_iterations,
                 log_context=ctx,
+                seed_seen_calls=seed_seen_calls,
             )
         except ModelAPIError as exc:
             log_event(_logger, logging.ERROR, "decision.api_error", error_type=type(exc.original).__name__, **ctx)
