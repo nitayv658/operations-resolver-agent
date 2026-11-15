@@ -94,3 +94,73 @@ def test_backfill_leaves_correctly_typed_fields_alone():
         "rulebook_version": "1.0.0",
     }
     assert _backfill_researcher_ok_fields(dict(raw)) == raw
+
+
+def test_default_comms_model_when_shared_model_is_not_anthropic_should_follow_it(monkeypatch):
+    for var in ("ANTHROPIC_MODEL_RESEARCHER", "ANTHROPIC_MODEL_DECISION", "ANTHROPIC_MODEL_COMMS"):
+        monkeypatch.delenv(var, raising=False)
+
+    crew = CrewAIOperationsCrew(model="openai/gpt-4o")
+
+    assert crew.researcher_model == "openai/gpt-4o"
+    assert crew.decision_model == "openai/gpt-4o"
+    assert crew.comms_model == "openai/gpt-4o"
+
+
+def _patch_stage_boundary(monkeypatch, exc):
+    import resolver_agent_crewai.crew.orchestrator as orchestrator
+
+    class _Stub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class _FailingCrew(_Stub):
+        def kickoff(self):
+            raise exc
+
+    monkeypatch.setattr(orchestrator, "Agent", _Stub)
+    monkeypatch.setattr(orchestrator, "Task", _Stub)
+    monkeypatch.setattr(orchestrator, "Crew", _FailingCrew)
+
+
+def _openai_error():
+    import httpx
+    import openai
+
+    return openai.APIConnectionError(request=httpx.Request("POST", "https://example.invalid/v1/chat"))
+
+
+def test_run_researcher_when_a_non_anthropic_api_error_is_raised_should_report_api_error(monkeypatch):
+    _patch_stage_boundary(monkeypatch, _openai_error())
+
+    result = CrewAIOperationsCrew(model="openai/gpt-4o")._run_researcher("ticket", "case1")
+
+    assert result.report is None
+    assert result.stopped_reason == "api_error"
+    assert result.error["error"] == "MODEL_API_ERROR"
+
+
+def test_run_decision_when_a_non_anthropic_api_error_is_raised_should_report_api_error(monkeypatch):
+    from types import SimpleNamespace
+
+    _patch_stage_boundary(monkeypatch, _openai_error())
+    risk_report = SimpleNamespace(model_dump_json=lambda: "{}", order_id="ORD-1001")
+
+    result = CrewAIOperationsCrew(model="openai/gpt-4o")._run_decision(risk_report, "case1")
+
+    assert result.decision is None
+    assert result.stopped_reason == "api_error"
+    assert result.error["error"] == "MODEL_API_ERROR"
+
+
+def test_run_comms_when_a_non_anthropic_api_error_is_raised_should_fall_back_to_the_safe_reply(monkeypatch):
+    from types import SimpleNamespace
+
+    _patch_stage_boundary(monkeypatch, _openai_error())
+    decision = SimpleNamespace(model_dump_json=lambda: "{}", refund_status="REJECTED")
+
+    result = CrewAIOperationsCrew(model="openai/gpt-4o")._run_comms(decision, "case1")
+
+    assert result.stopped_reason == "api_error"
+    assert result.customer_response
+    assert result.alert_sent is False

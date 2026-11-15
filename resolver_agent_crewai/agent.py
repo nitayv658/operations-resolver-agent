@@ -15,18 +15,23 @@ Real mechanism-level differences from Part 1, kept rather than papered over
   * Structured output comes from CrewAI's Task.output_pydantic parsing the
     agent's final answer, not a forced tool_use call pinned to a stop tool
     (tool_loop._forced_stop_call has no equivalent here).
-  * With the `anthropic/` model prefix _litellm_model() always sets, CrewAI
-    routes calls through its native Anthropic provider (crewai[anthropic]
-    extra -- requirements-crewai.txt), which calls the real anthropic SDK
-    directly and re-raises its own exceptions largely unchanged. So
-    anthropic.APIError -- the exact type tool_loop.py already catches --
-    is what's caught below too, confirmed empirically (not guessed): a
-    forced auth failure through this same code path raised
-    anthropic.AuthenticationError, a real subclass of anthropic.APIError.
-    Still coarser than tool_loop.ModelAPIError: it can't distinguish "SDK
-    retries exhausted" from "immediately non-retryable" the way that type
-    does, and it carries no equivalent of ModelAPIError.tool_calls (the
-    call_log list below already serves that purpose here).
+  * Provider-neutral model plumbing lives in provider.py: a bare model name
+    gets the LLM_PROVIDER prefix (default `anthropic/`), and
+    provider.MODEL_API_ERRORS is the set of exception types that mean "the
+    model API failed" -- anthropic.APIError, openai.APIError (also the base
+    of LiteLLM's exceptions) and, if installed, google.genai.errors.APIError.
+    With the default Anthropic provider CrewAI's native provider
+    (crewai[anthropic] extra -- requirements-crewai.txt) calls the real
+    anthropic SDK and re-raises its own exceptions largely unchanged, which
+    is the type tool_loop.py already catches too -- confirmed empirically, not
+    guessed: a forced auth failure through this same code path raised
+    anthropic.AuthenticationError, a real subclass of anthropic.APIError. The
+    other providers' exception types are covered by their SDK's hierarchy but
+    have not been exercised live. Still coarser than tool_loop.ModelAPIError:
+    it can't distinguish "SDK retries exhausted" from "immediately
+    non-retryable" the way that type does, and it carries no equivalent of
+    ModelAPIError.tool_calls (the call_log list below already serves that
+    purpose here).
   * No equivalent of tool_loop's Anthropic prompt-caching (cache_control
     breakpoints) is wired up.
   * stopped_reason collapses to "stop" (or "api_error") -- CrewAI does not
@@ -46,7 +51,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import anthropic  # noqa: E402  (crewai's native Anthropic provider re-raises this)
 from crewai import LLM, Agent, Crew, Process, Task  # noqa: E402
 
 from resolver_agent.escalation_workflow import trigger_workflow  # noqa: E402
@@ -54,6 +58,7 @@ from resolver_agent.logging_utils import get_logger, log_event  # noqa: E402
 from resolver_agent.output_tool import enforce_resolution, validate_schema  # noqa: E402
 from resolver_agent.tool_loop import ToolCallRecord  # noqa: E402
 
+from .provider import MODEL_API_ERRORS, qualify_model  # noqa: E402
 from .prompts import BACKSTORY, GOAL, ROLE, TASK_DESCRIPTION, TASK_EXPECTED_OUTPUT  # noqa: E402
 from .schemas import Resolution  # noqa: E402
 from .tools import build_tools  # noqa: E402
@@ -66,12 +71,6 @@ from .tools import build_tools  # noqa: E402
 _logger = get_logger("resolver_agent.crewai")
 
 DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
-
-
-def _litellm_model(model: str) -> str:
-    """CrewAI calls LiteLLM under the hood, which needs a provider-prefixed
-    model string -- Part 1's ANTHROPIC_MODEL / default is unprefixed."""
-    return model if "/" in model else f"anthropic/{model}"
 
 
 class CrewResolverAgent:
@@ -90,7 +89,7 @@ class CrewResolverAgent:
     ) -> None:
         if max_iterations < 1:
             raise ValueError(f"max_iterations must be at least 1, got {max_iterations!r}.")
-        self.model = _litellm_model(model)
+        self.model = qualify_model(model)
         # max_tokens=4096 mirrors tool_loop.py's own default -- raised there
         # after a live Part 2 run hit the API's 1024 default mid-turn with no
         # tool call at all (see tool_loop.py's run_tool_loop docstring).
@@ -141,7 +140,7 @@ class CrewResolverAgent:
 
         try:
             crew.kickoff()
-        except anthropic.APIError as exc:  # see module docstring: confirmed empirically
+        except MODEL_API_ERRORS as exc:  # see module docstring and provider.py
             log_event(
                 _logger,
                 logging.ERROR,
@@ -244,7 +243,7 @@ class CrewResolverAgent:
         }
 
     @staticmethod
-    def _api_failure_resolution(exc: "anthropic.APIError", call_log: List[ToolCallRecord]) -> Dict[str, Any]:
+    def _api_failure_resolution(exc: BaseException, call_log: List[ToolCallRecord]) -> Dict[str, Any]:
         return {
             "reasoning_chain": [f"The call to the model API failed: {exc}."],
             "action_taken": {

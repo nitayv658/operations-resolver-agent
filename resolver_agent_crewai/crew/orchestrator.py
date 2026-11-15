@@ -31,8 +31,8 @@ Mechanism-level differences from the hand-rolled version, same categories
 as resolver_agent_crewai/agent.py's (see the root README's CrewAI-port
 section): no forced-tool-call safety net (CrewAI's Task.output_pydantic
 instead), no automatic tool-call trace (each build_*_tools() wrapper builds
-its own call_log), anthropic.APIError caught per-stage instead of
-tool_loop.ModelAPIError, no prompt-caching hook wired up, and
+its own call_log), provider API errors (provider.MODEL_API_ERRORS) caught
+per-stage instead of tool_loop.ModelAPIError, no prompt-caching hook wired up, and
 stopped_reason collapsing "stop" vs a hit iteration budget into one value.
 """
 
@@ -47,7 +47,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import anthropic  # noqa: E402
 import pydantic  # noqa: E402
 from crewai import LLM, Agent, Crew, Process, Task  # noqa: E402
 
@@ -65,7 +64,6 @@ from resolver_agent.crew.decision.agent import DecisionResult  # noqa: E402
 from resolver_agent.crew.decision.output_tool import enforce_decision  # noqa: E402
 from resolver_agent.crew.decision.output_tool import validate_schema as _validate_decision_schema  # noqa: E402
 from resolver_agent.crew.orchestrator import (  # noqa: E402
-    DEFAULT_COMMS_MODEL,
     _dispatch_fallback_security_alert,
     _lookup_failure_response,
 )
@@ -76,7 +74,7 @@ from resolver_agent.crew.schemas import CrewResult, Decision, RiskReport  # noqa
 from resolver_agent.logging_utils import get_logger, log_event  # noqa: E402
 from resolver_agent.tool_loop import ToolCallRecord  # noqa: E402
 
-from ..agent import _litellm_model  # noqa: E402  (Part 1's port -- same anthropic/-prefix helper)
+from ..provider import MODEL_API_ERRORS, default_comms_model, is_model_api_error, qualify_model  # noqa: E402
 from .prompts import (  # noqa: E402
     COMMS_BACKSTORY,
     COMMS_GOAL,
@@ -178,11 +176,14 @@ class CrewAIOperationsCrew:
     ) -> None:
         # Same resolution order as OperationsCrew.__init__: explicit kwarg,
         # then the agent's own env var, then the shared `model` -- except
-        # Comms, which is never chained to `model` (see DEFAULT_COMMS_MODEL's
-        # own docstring in resolver_agent/crew/orchestrator.py).
-        self.researcher_model = _litellm_model(researcher_model or os.environ.get("ANTHROPIC_MODEL_RESEARCHER") or model)
-        self.decision_model = _litellm_model(decision_model or os.environ.get("ANTHROPIC_MODEL_DECISION") or model)
-        self.comms_model = _litellm_model(comms_model or os.environ.get("ANTHROPIC_MODEL_COMMS") or DEFAULT_COMMS_MODEL)
+        # Comms, which is never chained to `model` on Anthropic (see
+        # provider.default_comms_model and DEFAULT_COMMS_MODEL's own docstring in
+        # resolver_agent/crew/orchestrator.py).
+        self.researcher_model = qualify_model(researcher_model or os.environ.get("ANTHROPIC_MODEL_RESEARCHER") or model)
+        self.decision_model = qualify_model(decision_model or os.environ.get("ANTHROPIC_MODEL_DECISION") or model)
+        self.comms_model = qualify_model(
+            comms_model or os.environ.get("ANTHROPIC_MODEL_COMMS") or default_comms_model(qualify_model(model))
+        )
         self.researcher_llm = LLM(model=self.researcher_model, max_tokens=_MAX_TOKENS)
         self.decision_llm = LLM(model=self.decision_model, max_tokens=_MAX_TOKENS)
         self.comms_llm = LLM(model=self.comms_model, max_tokens=_MAX_TOKENS)
@@ -331,7 +332,7 @@ class CrewAIOperationsCrew:
 
         try:
             crew.kickoff()
-        except anthropic.APIError as exc:
+        except MODEL_API_ERRORS as exc:
             log_event(_logger, logging.ERROR, "crew_agent.researcher.api_error", error_type=type(exc).__name__, **ctx)
             return ResearcherResult(
                 report=None,
@@ -461,7 +462,7 @@ class CrewAIOperationsCrew:
 
         try:
             crew.kickoff()
-        except anthropic.APIError as exc:
+        except MODEL_API_ERRORS as exc:
             log_event(_logger, logging.ERROR, "crew_agent.decision.api_error", error_type=type(exc).__name__, **ctx)
             return DecisionResult(
                 decision=None,
@@ -560,7 +561,7 @@ class CrewAIOperationsCrew:
 
         try:
             crew.kickoff()
-        except (anthropic.APIError, pydantic.ValidationError) as exc:
+        except (*MODEL_API_ERRORS, pydantic.ValidationError) as exc:
             log_event(_logger, logging.ERROR, "crew_agent.comms.api_error", error_type=type(exc).__name__, **ctx)
             return CommsResult(
                 customer_response=_safe_customer_response(decision.refund_status),
@@ -568,7 +569,7 @@ class CrewAIOperationsCrew:
                 alert_sent=False,
                 alert_record=None,
                 tool_calls=call_log,
-                stopped_reason="api_error" if isinstance(exc, anthropic.APIError) else "stop",
+                stopped_reason="api_error" if is_model_api_error(exc) else "stop",
             )
 
         escalation = CommsAgent._last_successful(call_log, "get_escalation_route")
