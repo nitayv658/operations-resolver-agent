@@ -20,4 +20,9 @@
 # The native provider needs the [anthropic] extra -- it installs the real
 # anthropic SDK directly rather than routing everything through LiteLLM.
 crewai[anthropic]==1.15.21
+# Optional -- to run the port on another provider, install that provider's
+# CrewAI extra alongside (e.g. `pip install "crewai[google-genai]==1.15.21"`;
+# OpenAI support is already part of CrewAI's core dependencies) and set
+# LLM_PROVIDER / a provider-prefixed model name -- see .env.example and the
+# root README's "Using a different model provider".
 pytest>=8.0

@@ -310,6 +310,32 @@ and confirm it: **10/10 scenarios matched Part 1's decisions cleanly** (same
 pass condition as `scripts/run_scenarios.py` — the exact decision, zero
 `_validation_warnings`), on a live run against the real API.
 
+### Using a different model provider
+
+Unlike the hand-rolled version — which speaks Anthropic's tool-use protocol
+directly and would need an adapter to change provider — this port can run on
+any provider CrewAI supports. Two Anthropic assumptions used to be hard-coded
+and now live in [`provider.py`](resolver_agent_crewai/provider.py):
+
+- **Model naming.** A bare model name gets the `LLM_PROVIDER` prefix (default
+  `anthropic`, so nothing changes unless you set it); an already-prefixed name
+  like `openai/gpt-4o` is used as-is. Comms defaults to Haiku only when the
+  shared model is Anthropic — on any other provider it follows the shared
+  model, so a run never silently needs a second provider's API key.
+- **What counts as an API failure.** The port now catches
+  `provider.MODEL_API_ERRORS` (`anthropic.APIError`, `openai.APIError` — also
+  the base of LiteLLM's exceptions — and `google.genai.errors.APIError` when
+  installed) instead of only `anthropic.APIError`, so another provider's outage
+  still degrades to "escalate to a human" instead of crashing. Ordinary bugs
+  are deliberately not caught.
+
+Needs that provider's CrewAI extra (e.g. `crewai[google-genai]`) and API key —
+see `requirements-crewai.txt` and `.env.example`. Honest limits: this is
+covered by unit tests with simulated provider errors, **not** by a live run
+on any non-Anthropic provider, and weaker models are likelier to trip the
+structured-output parsing that Part 2b below already needed a backfill for —
+treat a provider swap as a reliability experiment, not just a config change.
+
 ### A real version incompatibility, found by actually running it
 
 `crewai==0.86.0` was the first version installed, and it's fundamentally
