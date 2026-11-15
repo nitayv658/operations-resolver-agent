@@ -73,3 +73,30 @@ def test_api_failure_resolution_reports_the_failure_and_escalates():
     assert resolution["action_taken"]["decision"] == "ESCALATION_REQUIRED"
     assert resolution["action_taken"]["tools_called"] == ["get_order_details"]
     assert "boom" in resolution["reasoning_chain"][0]
+
+
+def test_resolve_when_a_non_anthropic_provider_api_error_is_raised_should_escalate_not_crash(monkeypatch):
+    # The port used to catch only anthropic.APIError, so a failure from any
+    # other provider (here an openai.APIError, also the base of LiteLLM's
+    # exceptions) escaped resolve() instead of reaching the escalate fallback.
+    import httpx
+    import openai
+
+    from resolver_agent_crewai import agent as agent_module
+
+    class _Stub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class _FailingCrew(_Stub):
+        def kickoff(self):
+            raise openai.APIConnectionError(request=httpx.Request("POST", "https://example.invalid/v1/chat"))
+
+    monkeypatch.setattr(agent_module, "Agent", _Stub)
+    monkeypatch.setattr(agent_module, "Task", _Stub)
+    monkeypatch.setattr(agent_module, "Crew", _FailingCrew)
+
+    resolution = CrewResolverAgent(model="openai/gpt-4o").resolve("Hi, my order ORD-1001 arrived broken.")
+
+    assert resolution["action_taken"]["decision"] == "ESCALATION_REQUIRED"
+    assert resolution["_stopped_reason"] == "api_error"
